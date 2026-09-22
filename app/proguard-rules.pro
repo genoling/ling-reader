@@ -1,0 +1,4 @@
+-keepattributes *Annotation*
+-keep class kotlinx.serialization.** { *; }
+-dontwarn okhttp3.**
+-dontwarn okio.**

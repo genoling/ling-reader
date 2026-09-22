@@ -1,6 +1,6 @@
 MIT License
 
-Copyright (c) 2026 genoling
+Copyright (c) 2026 LingReader contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -19,3 +19,10 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+
+关于第三方数据：
+- 英汉词典数据（21世纪大英汉词典）与分级词库（CET4/CET6/考研/专四/专八/GRE/雅思/托福/高中/BEC）
+  来自公开词典数据，仅供个人学习使用，其版权归原始权利人所有。
+- 本项目不包含任何商业词典或受版权保护的内容分发授权。

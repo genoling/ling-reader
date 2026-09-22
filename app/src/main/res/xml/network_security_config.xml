@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  词典下载源允许明文 HTTP：
+  - 默认源是 GitHub Release（https），无需明文；
+  - 但设置页允许用户把下载源换成国内镜像 / 局域网自建服务器，这类地址常是 http，
+    targetSdk ≥ 28 时系统默认禁止明文，会导致「CLEARTEXT communication not permitted」。
+  风险控制：词典下载完成后会校验**字节数**与 **SQLite 文件头**，畸形/篡改的文件不会被安装。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
