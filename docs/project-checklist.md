@@ -14,7 +14,7 @@
 | `docs/screenshots/README.md` | ✅ | 截图命名规范与抓取方式 |
 | `docs/setup-github.ps1` | ✅ | 初始化 + 提交 + 推送脚本 |
 | `docs/screenshots/01~07*.png` | ⚠️ **待补** | 实际运行截图，7 张（见该目录说明） |
-| `CHANGELOG.md` | ➖ | README §8 版本历史已承担，避免两处维护 |
+| `CHANGELOG.md` | ✅ | 已建立（版本历史从 README 迁出，Keep a Changelog 格式） |
 | `CONTRIBUTING.md` | ⚠️ 可选 | 单人项目可暂缓 |
 | `.github/workflows/build.yml` | ⚠️ 可选 | CI 自动编译，首次推送后再加 |
 

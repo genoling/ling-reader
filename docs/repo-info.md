@@ -23,7 +23,7 @@ ling-reader
 
 ## Website
 
-留空，或填 Releases 页面：`https://github.com/<your-name>/ling-reader/releases`
+留空，或填 Releases 页面：`https://github.com/genoling/ling-reader/releases`
 
 ## Topics（仓库标签，逐个添加）
 
@@ -77,7 +77,7 @@ minSdk 24 / targetSdk 33，Android 7.0 及以上。
 ## Badge 片段（已内置在 README，可按需替换用户名）
 
 ```markdown
-[![Release](https://img.shields.io/github/v/release/<your-name>/ling-reader)](https://github.com/<your-name>/ling-reader/releases)
-[![Stars](https://img.shields.io/github/stars/<your-name>/ling-reader)](https://github.com/<your-name>/ling-reader/stargazers)
-[![Issues](https://img.shields.io/github/issues/<your-name>/ling-reader)](https://github.com/<your-name>/ling-reader/issues)
+[![Release](https://img.shields.io/github/v/release/genoling/ling-reader)](https://github.com/genoling/ling-reader/releases)
+[![Stars](https://img.shields.io/github/stars/genoling/ling-reader)](https://github.com/genoling/ling-reader/stargazers)
+[![Issues](https://img.shields.io/github/issues/genoling/ling-reader)](https://github.com/genoling/ling-reader/issues)
 ```
