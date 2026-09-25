@@ -48,6 +48,29 @@ registry.add(MyTranslator(ks.get("my_key")))
 
 ---
 
+## 发布签名
+
+发布包使用**正式签名**（release keystore），日后所有版本都能覆盖安装，也可以上架应用商店。
+
+| 文件 | 位置 | 说明 |
+|---|---|---|
+| 密钥库 | `keystore/lingreader-release.jks` | 别名 `lingreader`，RSA 2048，有效期约 30 年 |
+| 口令配置 | `keystore.properties` | `storeFile` / `storePassword` / `keyAlias` / `keyPassword` |
+| 证书指纹 | SHA-256 `7cc79b65556c6d4a638252085e37a8b0867ab652e7c62f58b924195eb6d575b6` | 用 `apksigner verify --print-certs` 核对 |
+
+- 这两个文件都在 `.gitignore` 里，**绝不进版本库**；请另行安全备份 —— 丢失后无法再发布可覆盖安装的升级包（只能换新签名，用户须卸载重装）。
+- 配置缺失时（他人 clone、CI）`signingConfigs.release` 自动回退 debug 签名，`assembleRelease` 不会失败。
+- 构建与校验：
+
+```powershell
+$env:JAVA_HOME = 'E:\Program Files\PyCharm Community Edition 2024.2.4\jbr'
+.\gradlew.bat assembleRelease --console=plain
+& 'E:\Android_Sdk\build-tools\34.0.0\apksigner.bat' verify --print-certs app\build\outputs\apk\release\app-release.apk
+```
+
+- ⚠️ **换签名的那一次升级**：Android 要求同包名 + 同签名才允许覆盖安装，因此老用户必须先卸载再装。
+  发布说明里要写明「先在旧版导出 CSV 或确认已开启云同步」，新版装好后用同一个同步码恢复生词本与阅读进度。
+
 ## 构建与运行
 
 ### 前置环境

@@ -57,6 +57,7 @@ captures/
 *.keystore
 keystore.properties
 signing.properties
+keystore/
 
 # ---------------------------------------------------------------------------
 # 用户敏感数据（翻译平台 Key 等）

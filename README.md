@@ -57,7 +57,7 @@ LingReader 面向「读英文原著 / 外刊」的学习场景，把**生词查�
 
 无需编译，直接安装 APK：
 
-1. 打开 **[Releases](https://github.com/genoling/ling-reader/releases/latest)** 页面，下载最新版附件 `LingReader-<版本>-debug.apk`（约 19 MB）
+1. 打开 **[Releases](https://github.com/genoling/ling-reader/releases/latest)** 页面，下载最新版附件 `LingReader-<版本>-release.apk`（约 14.5 MB）
 2. 手机上安装时允许「安装未知来源应用」
 3. 首次进入 App 后到 **设置 → 本地词典** 依次下载（默认走本仓库 GitHub Release，直连慢时可在同一页改「下载源」）：
    - **21世纪大英汉词典**（约 115 MB，主词典，必下）
@@ -67,7 +67,10 @@ LingReader 面向「读英文原著 / 外刊」的学习场景，把**生词查�
 
 > **词典未下载时 App 依然可用**：阅读、分级高亮、生词本、翻译都正常，只是点词查不到释义。
 >
-> 当前发布的是 **debug 签名**安装包。将来切换 release 签名的正式版时两者签名不同，**必须先卸载再安装**（应用内数据会清空），建议提前用 **生词本 → 导出 CSV** 备份。
+> **关于签名**：`v1.5.2` 起使用**正式签名（release keystore）**，此后的版本都能直接覆盖安装。
+> 如果你装的是 `v1.5.1` 及更早的 **debug 签名**包，两者签名不同，**必须先卸载旧版再装新版**（卸载会清空本机数据）——
+> 建议先在旧版里「生词本 → 导出 CSV」备份，或确认已开启云同步；新版装好后填入同一个同步码即可恢复生词本与阅读进度
+> （书籍需要重新导入，词典需要重新下载）。
 
 ## 快速开始
 
@@ -84,7 +87,9 @@ echo "sdk.dir=/path/to/Android/Sdk" > local.properties
 ./gradlew assembleDebug
 ```
 
-产物：`app/build/outputs/apk/debug/app-debug.apk`（约 19 MB）
+产物：
+- `app/build/outputs/apk/debug/app-debug.apk`（约 19 MB，日常调试）
+- `./gradlew assembleRelease` → `app/build/outputs/apk/release/app-release.apk`（约 14.5 MB，**正式签名**，见 [docs/development.md](docs/development.md) 的「发布签名」）
 
 ```bash
 adb install -r app/build/outputs/apk/debug/app-debug.apk

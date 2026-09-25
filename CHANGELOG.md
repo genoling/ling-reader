@@ -3,6 +3,23 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与 [语义化版本](https://semver.org/lang/zh-CN/)。
 版本号对应 `app/build.gradle.kts` 中的 `versionName` / `versionCode`。
 
+## [1.5.2] - 2026-09-25
+
+**改用正式签名（release keystore）发布：身份固定、可上架，此后所有版本都能直接覆盖安装。**
+
+- `app/build.gradle.kts` 新增 `signingConfigs.release`：密钥读自项目根 `keystore.properties`
+  （`keystore/lingreader-release.jks`，两者都在 `.gitignore`，**绝不进版本库**）；
+  配置缺失时自动回退 debug 签名，他人 clone 也能正常 `assembleRelease`。
+- 发布包改用 `./gradlew assembleRelease`：`app-release.apk` 约 **14.5 MB**（比 debug 包小约 6 MB）。
+- 证书指纹（SHA-256）：`7cc79b65556c6d4a638252085e37a8b0867ab652e7c62f58b924195eb6d575b6`。
+- ⚠️ **签名变更：首次升级必须先卸载旧版再安装**（Android 要求同包名 + 同签名才能覆盖）。
+  卸载会清空本机数据 —— 建议先在旧版「生词本 → 导出 CSV」备份，或确认已开启云同步；
+  新版装好后填入**同一个同步码**即可恢复生词本与阅读进度（书籍需重新导入、词典需重新下载）。
+- 实测：卸载旧版 → 安装正式签名包 → 启动即自动同步（默认开启）→ 生词本 11 词完整恢复。
+- `assembleDebug` 零警告；`versionCode` 16 → **17**，`versionName` `1.5.1` → **`1.5.2`**。
+
+---
+
 ## [1.5.1] - 2026-09-25
 
 **设置页改为「折叠分组」：一屏看全所有设置，点开才展开细节。**
