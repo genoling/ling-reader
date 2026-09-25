@@ -5,10 +5,18 @@ import com.lreader.data.SettingsStore
 import com.lreader.dict.DictManager
 import com.lreader.speech.SpeechManager
 import com.lreader.speech.TtsCatalog
+import com.lreader.sync.SyncManager
 import com.lreader.translate.TranslationEngines
 import com.lreader.ui.theme.AppThemeState
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 class LRreaderApp : Application() {
+
+    /** 只在进程存活期内使用，故不取消（Application 生命周期即进程生命周期） */
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     override fun onCreate() {
         super.onCreate()
         TranslationEngines.init(this)
@@ -27,5 +35,8 @@ class LRreaderApp : Application() {
             enginePackage = settings.ttsEngine.ifBlank { null }
             init()
         }
+        // 云同步：进入 App 时静默同步一次（生词本 + 阅读进度）。
+        // 失败只在设置页可见，不弹窗打扰；阅读页读取生词前会短暂等它结束（见 SyncManager.awaitInitialSync）。
+        appScope.launch { SyncManager.autoSync(this@LRreaderApp) }
     }
 }

@@ -24,6 +24,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.lreader.ui.admin.AdminScreen
 import com.lreader.ui.magazine.MagazineScreen
 import com.lreader.ui.reader.ReaderScreen
 import com.lreader.ui.settings.SettingsScreen
@@ -37,6 +38,7 @@ object Routes {
     const val SETTINGS = "settings"
     const val REVIEW = "review"
     const val READER = "reader"
+    const val ADMIN = "admin"          // 管理员面板（设置页密码进入）
 
     fun reader(bookId: String) = "reader?bookId=${encode(bookId)}"
 }
@@ -92,7 +94,11 @@ fun AppNavHost() {
             }
 
             composable(Routes.SETTINGS) {
-                SettingsScreen()
+                SettingsScreen(onOpenAdmin = { nav.navigate(Routes.ADMIN) })
+            }
+
+            composable(Routes.ADMIN) {
+                AdminScreen(onBack = { nav.popBackStack() })
             }
 
             composable(

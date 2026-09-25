@@ -4,6 +4,7 @@ import android.content.Intent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -16,7 +17,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -33,6 +36,8 @@ import com.lreader.dict.LevelDictionary
 import com.lreader.speech.SpeechManager
 import com.lreader.speech.TtsCatalog
 import com.lreader.speech.TtsInstaller
+import com.lreader.sync.SyncCode
+import com.lreader.sync.SyncManager
 import com.lreader.translate.TranslationEngines
 import com.lreader.ui.theme.AppThemeState
 import com.lreader.ui.theme.ThemePreset
@@ -40,9 +45,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+/** 管理员入口密码（需求指定） */
+private const val ADMIN_PASSWORD = "8848"
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen() {
+fun SettingsScreen(onOpenAdmin: () -> Unit = {}) {
     val context = LocalContext.current
     val dict = remember { DictDatabase(context) }
     val levels = remember { LevelDictionary(context) }
@@ -205,6 +213,10 @@ fun SettingsScreen() {
                     }
                 }
             }
+
+            // ---------- 云同步（生词本） ----------
+            SectionTitle("云同步")
+            SyncSection(settings)
 
             // ---------- 本地词典（按需下载） ----------
             SectionTitle("本地词典")
@@ -640,6 +652,10 @@ fun SettingsScreen() {
             }
 
             // ---------- 关于 / 版本更新 ----------
+            // ---------- 高级（管理员，需密码） ----------
+            SectionTitle("高级")
+            AdminEntryCard(onOpenAdmin = onOpenAdmin)
+
             SectionTitle("关于")
             Card {
                 Column(Modifier.padding(14.dp)) {
@@ -894,6 +910,258 @@ private fun AccentChip(label: String, selected: Boolean, onClick: () -> Unit) {
         label = { Text(label, fontSize = 13.sp) }
     )
 }
+
+/**
+ * 管理员入口：点击后输入密码，正确才进入 [com.lreader.ui.admin.AdminScreen]。
+ *
+ * 面板里能看/删本机各数据库（生词本、书架、设置、书籍、封面、插图缓存），
+ * 也能列出并删除云端各用户的数据目录。
+ */
+@Composable
+private fun AdminEntryCard(onOpenAdmin: () -> Unit) {
+    var showDialog by remember { mutableStateOf(false) }
+    var pwd by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    Card {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clickable {
+                    pwd = ""
+                    error = null
+                    showDialog = true
+                }
+                .padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("管理员模式", fontSize = 14.sp)
+                Text(
+                    "查看 / 清理本机数据库，删除云端用户数据",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Text("进入", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+        }
+    }
+
+    if (showDialog) {
+        AlertDialog(
+            onDismissRequest = { showDialog = false },
+            title = { Text("管理员密码", fontSize = 16.sp) },
+            text = {
+                OutlinedTextField(
+                    value = pwd,
+                    onValueChange = { pwd = it },
+                    label = { Text("密码", fontSize = 12.sp) },
+                    singleLine = true,
+                    isError = error != null,
+                    supportingText = if (error != null) {
+                        { Text(error!!, fontSize = 11.sp) }
+                    } else {
+                        null
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        if (pwd == ADMIN_PASSWORD) {
+                            showDialog = false
+                            onOpenAdmin()
+                        } else {
+                            error = "密码不正确"
+                        }
+                    }
+                ) { Text("确定") }
+            },
+            dismissButton = { TextButton(onClick = { showDialog = false }) { Text("取消") } }
+        )
+    }
+}
+
+/**
+ * 云同步（生词本）：把加密后的生词本同步到用户自己的 GitHub 私有仓库。
+ *
+ * 密钥由同步码里的口令派生（`SyncCrypto`），云端只有密文；第二台设备粘贴同一个同步码即完成配对。
+ */
+@Composable
+private fun SyncSection(settings: SettingsStore) {
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
+    val scope = rememberCoroutineScope()
+
+    var codeDraft by remember { mutableStateOf(settings.syncCode) }
+    var busy by remember { mutableStateOf(false) }
+    var message by remember { mutableStateOf<String?>(null) }
+    var showGenerator by remember { mutableStateOf(false) }
+
+    val cfg = remember(codeDraft) { SyncCode.decode(codeDraft) }
+
+    fun runSync(push: Boolean = true) {
+        if (busy) return
+        busy = true
+        message = null
+        scope.launch {
+            val r = withContext(Dispatchers.IO) { runCatching { SyncManager.sync(context, push) } }
+            busy = false
+            message = r.fold(
+                onSuccess = { "同步完成：云端共 ${it.total} 条，本地更新 ${it.applied} 条" },
+                onFailure = { "同步失败：${it.message ?: "未知错误"}" }
+            )
+        }
+    }
+
+    Card {
+        Column(Modifier.padding(14.dp)) {
+            Text(
+                "生词本加密同步到自己的 GitHub 私有仓库：云端只存密文，仓库主人也读不到内容。" +
+                    "在第一台设备生成同步码，第二台粘贴同一个码即完成配对。",
+                fontSize = 12.sp,
+                lineHeight = 17.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(8.dp))
+            if (cfg != null) {
+                Text("已配置：${cfg.repoLabel}", fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                Text(
+                    "目录 users/${cfg.syncId} · 上次同步 " + fmtSyncTime(settings.lastSyncAt),
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                Text(
+                    "未配置同步码",
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(
+                value = codeDraft,
+                onValueChange = { codeDraft = it },
+                label = { Text("同步码（LR1.…）", fontSize = 12.sp) },
+                modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(Modifier.height(4.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(
+                    onClick = {
+                        settings.syncCode = codeDraft
+                        if (SyncCode.decode(codeDraft) == null) {
+                            message = "同步码格式无效，请检查是否完整"
+                        } else {
+                            runSync()
+                        }
+                    }
+                ) { Text(if (busy) "同步中…" else "保存并同步", fontSize = 12.sp) }
+
+                TextButton(
+                    onClick = {
+                        if (codeDraft.isNotBlank()) {
+                            clipboard.setText(AnnotatedString(codeDraft))
+                            message = "同步码已复制，粘贴到第二台设备即可"
+                        }
+                    }
+                ) { Text("复制", fontSize = 12.sp) }
+
+                TextButton(onClick = { showGenerator = true }) { Text("生成", fontSize = 12.sp) }
+
+                if (settings.syncCode.isNotBlank()) {
+                    TextButton(
+                        onClick = {
+                            settings.syncCode = ""
+                            codeDraft = ""
+                            message = "已断开同步（云端数据不会被删除）"
+                        }
+                    ) { Text("断开", fontSize = 12.sp) }
+                }
+            }
+            SwitchRow("自动同步（进入 App 时）", settings.syncAuto) { settings.syncAuto = it }
+            message?.let { Hint(it) }
+        }
+    }
+
+    if (showGenerator) {
+        SyncCodeGeneratorDialog(
+            onDismiss = { showGenerator = false },
+            onCreated = { code ->
+                settings.syncCode = code
+                codeDraft = code
+                showGenerator = false
+                message = "已生成同步码：复制到其它设备粘贴即可"
+            }
+        )
+    }
+}
+
+/** 「生成同步码」对话框：填仓库与 token，生成新的同步 id + 加密口令 */
+@Composable
+private fun SyncCodeGeneratorDialog(
+    onDismiss: () -> Unit,
+    onCreated: (String) -> Unit
+) {
+    var owner by remember { mutableStateOf("") }
+    var repo by remember { mutableStateOf("") }
+    var branch by remember { mutableStateOf("main") }
+    var token by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("生成同步码", fontSize = 16.sp) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text(
+                    "1. 在 GitHub 建一个**私有**仓库（例如 lr-sync）\n" +
+                        "2. 生成 fine-grained token，权限只给 Contents: Read and write\n" +
+                        "3. 填在下面生成同步码，再复制到其它设备",
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = owner, onValueChange = { owner = it },
+                    label = { Text("GitHub 用户名", fontSize = 12.sp) },
+                    singleLine = true, modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = repo, onValueChange = { repo = it },
+                    label = { Text("仓库名", fontSize = 12.sp) },
+                    singleLine = true, modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = branch, onValueChange = { branch = it },
+                    label = { Text("分支", fontSize = 12.sp) },
+                    singleLine = true, modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = token, onValueChange = { token = it },
+                    label = { Text("Token（github_pat_…）", fontSize = 12.sp) },
+                    singleLine = true, modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = owner.isNotBlank() && repo.isNotBlank() && token.isNotBlank(),
+                onClick = {
+                    onCreated(SyncCode.encode(SyncManager.newConfig(owner, repo, branch, token)))
+                }
+            ) { Text("生成") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
+}
+
+/** 上次同步时间（简短格式） */
+private fun fmtSyncTime(ms: Long): String =
+    if (ms <= 0) "从未同步"
+    else java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.US).format(java.util.Date(ms))
 
 @Composable
 private fun KeyField(label: String, keyName: String) {

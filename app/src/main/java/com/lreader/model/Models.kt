@@ -11,6 +11,13 @@ data class Book(
     val coverPath: String? = null,
     val lastChapterIndex: Int = 0,
     val lastScrollY: Int = 0,
+    /**
+     * 章内进度百分比（0f~1f）。
+     * 跨设备同步阅读进度只能用它 —— 页码依赖字号与屏幕，换设备后没有意义。
+     */
+    val lastPercent: Float = 0f,
+    /** 进度最后修改时间（毫秒），跨设备合并时取更新的那条 */
+    val progressUpdatedAt: Long = 0,
     val addedAt: Long = System.currentTimeMillis()
 )
 
@@ -56,7 +63,29 @@ data class Chapter(
     val title: String,
     val content: String,
     /** 插图列表，与 [content] 中的 `\uFFFC` 占位符按顺序对应（无图时为空） */
-    val images: List<ChapterImage> = emptyList()
+    val images: List<ChapterImage> = emptyList(),
+    /**
+     * 目录（EPUB `toc.ncx` / `nav.xhtml`）里的标题。
+     * 电子书自带的 `<title>` 经常被截断（如 `The selfish case for helping Ukraine has`），
+     * 目录标题才是完整的文章名。
+     */
+    val tocTitle: String? = null,
+    /** 目录层级：0 = 顶层栏目（The world this week / Leaders…），1 = 文章 */
+    val tocLevel: Int = 0,
+    /** 在压缩包内的文件路径（EPUB 用；用于把目录锚点映射回章节号） */
+    val sourcePath: String? = null
+)
+
+/**
+ * 章节目录的一项（来自 EPUB 的 `toc.ncx` / `nav.xhtml`）。
+ *
+ * @param chapterIndex 对应 [Chapter.index]（spine 顺序），点击直接跳章
+ * @param level 层级：0 = 顶层栏目（The world this week / Leaders…），1 = 具体文章
+ */
+data class TocEntry(
+    val title: String,
+    val chapterIndex: Int,
+    val level: Int = 0
 )
 
 /**
@@ -98,7 +127,21 @@ data class VocabWord(
     val interval: Int = 0,
     val easiness: Double = 2.5,
     val grade: Int = 0,
-    val nextReview: Long = System.currentTimeMillis()
+    val nextReview: Long = System.currentTimeMillis(),
+
+    // ---- 跨设备同步元数据（见 sync 包）----
+    /**
+     * 跨设备唯一 id。`id` 是各设备自己的自增主键，两台设备会撞车，
+     * 合并时一律以 [uid] 为主键。老数据升级时自动补 UUID。
+     */
+    val uid: String = "",
+    /** 最后修改时间（毫秒）；合并时同一 [uid] 取更晚的一条 */
+    val updatedAt: Long = 0,
+    /**
+     * 软删除。删除必须是"标记 + 同步"，否则 A 设备删掉的词
+     * 会被 B 设备的下一次上传又同步回来。
+     */
+    val deleted: Boolean = false
 )
 
 /**

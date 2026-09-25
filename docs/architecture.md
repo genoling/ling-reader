@@ -58,6 +58,15 @@ ling-reader/                       # ★ Android 工程根目录（GitHub 仓库
             ├── model/
             │   └── Models.kt              # 全部数据类
             │
+            ├── sync/
+            │   ├── SyncEngine.kt          # ★ 通用双向合并（下载→解密→合并→加密上传，sha 乐观锁 + 冲突重试）
+            │   ├── SyncCrypto.kt          # 端到端加密：PBKDF2(口令, salt=syncId, 12 万轮) → AES-256-GCM
+            │   ├── SyncCode.kt            # 同步码：仓库 + token + 用户目录 + 口令打包成一个字符串
+            │   ├── GithubBackend.kt       # GitHub Contents API 后端（私有仓库，每人一个目录）
+            │   ├── VocabSync.kt           # 生词本同步（云端是加密 CSV）
+            │   ├── ProgressSync.kt        # 阅读进度（章节 + 章内百分比）
+            │   └── SyncManager.kt         # 调度：sync() / autoSync() / awaitInitialSync()
+            │
             ├── dict/
             │   ├── DictCatalog.kt         # 词典资源清单 + 默认下载源（GitHub Release 常量）
             │   ├── DictManager.kt         # ★ 资源安装管理：内置释放 / 下载(进度·取消) / 校验 / 删除
@@ -100,7 +109,8 @@ ling-reader/                       # ★ Android 工程根目录（GitHub 仓库
                 ├── vocab/
                 │   ├── VocabScreen.kt     # 生词本列表
                 │   └── ReviewScreen.kt    # 背单词
-                └── settings/SettingsScreen.kt # 设置页（含词典资源管理区块）
+                ├── admin/AdminScreen.kt   # 管理员面板（密码进入）：本机数据库体积 / 删除、云端用户删除
+                └── settings/SettingsScreen.kt # 设置页（词典资源管理、云同步、管理员入口）
 ```
 
 > 词典与词库的原始构建工具链（`mdx2sqlite.py` / `shrink_dict.py` / `export_levels.py` / `verify_dict.py` 与 21 世纪大英汉词典 `.mdx` 源）不在本仓库内，
@@ -270,6 +280,24 @@ bookId 用 `URLEncoder/URLDecoder` 编解码（因为它可能是文件路径）
   - **轻点** → 取 `"WORD"` 注解 → 发音 → 查词
   - **长按** → `Selections.wordAt()` 命中单词并建立选区；长按后继续拖动可整词扩选；松手提交
 - `PagedReader`：`var selection by remember(chapterKey)`，翻页/换章自动清空选区
+- **正文分级排版**：`BookParser.htmlToText` 在 `h1/h2/h3/h4~h6/blockquote` 处插入控制字符标记
+  （`MARK_TITLE`…`MARK_QUOTE`），阅读页 `parseBlocks()` 还原成 `TextBlock(text, BlockKind)`，
+  按 `BlockKind.scale/bold/dim` 渲染（标题 1.55x/1.25x/1.10x 加粗、栏目与引用用次要色）；
+  测量与渲染共用 `blockStyle()`，否则分页行数会对不上
+- **书内链接与列表**：`htmlToText` 把 `<li>` 转成「换行 + `• `」、把 `<a href>` 转成
+  `MARK_LINK 目标路径 MARK_LINK_TEXT 文字 MARK_LINK_END`；阅读页将「整块内容就是链接」的块渲染为
+  `LinkLine`（主色 + 下划线，点击 → `onInternalLink(路径)` → `chapters.indexOfFirst { it.sourcePath == 路径 }` 跳章），
+  正文里与文字混排的链接退化为普通文字，避免整段染色
+- **分页 + 图文混排**：先用透明 `Text` 逐块测量（`onTextLayout`，key = `layoutKey(段号, 块号)`），
+  插图只读图片头部（`inJustDecodeBounds`）按正文宽度等比换算高度，再由 `paginateFlow()` 按**像素**
+  把「文字块 + 插图」装进同一页（`ReaderPage.blocks`）；每块按自己的行高累加，一页由多个 `PageBlock` 组成，
+  渲染时 `Column` 顺序排布 `WordText` 与 `ChapterImageView`。
+  正文插图限高页高的 62%（否则宽屏上图片会撑满整页、把整段文字挤到下一页），
+  整章几乎只有一张图（封面）时放宽到 94%
+- **目录**：`BookParser.loadToc(book, chapters)` 解析 EPUB 的 `toc.ncx` / `nav.xhtml`
+  （保留父子层级、锚点去 fragment），顶栏「目录」按钮 → 弹层点击跳章；无目录信息（txt/fb2）时回退成章节列表
+- **阅读进度**：`lastChapterIndex` + `lastScrollY`（复用为页码）；进入时恢复，
+  翻页 / 切章后防抖 800ms 自动保存，离开页面 `onDispose` 再兜一次
 - 选区提交分流：单字 → 查词弹层；多字 → `onPhraseSelect` 走句子翻译
 - 手势回调用 `rememberUpdatedState` 包裹，避免长寿命手势闭包读到旧选区
 - 配色优先级：**生词本词(红)** > **分级词(各级色)** > 默认黑
@@ -306,6 +334,25 @@ bookId 用 `URLEncoder/URLDecoder` 编解码（因为它可能是文件路径）
 ---
 
 ## 关键数据流
+
+### 跨设备同步（生词本 / 阅读进度）
+
+```
+进入 App（LRreaderApp）
+  → SyncManager.autoSync()                      [IO 线程；失败只记日志，设置页可见]
+      → SyncEngine.run()                        每个文件一轮：
+           下载 users/<syncId>/*.enc   （GitHub Contents API，顺带拿到 sha）
+           → SyncCrypto.decrypt()    （口令 → PBKDF2 → AES-GCM；失败 = 同步码不对）
+           → 解析（CSV / JSON）
+           → merge()                 按主键去重，同主键取 updatedAt 更新的一条
+           → changes() → apply()     只把有变化的写回本地（生词库 / bookshelf.json）
+           → SyncCrypto.encrypt() → upload(带 sha)
+                 冲突（409/422）→ 重新下载合并，最多 3 轮
+```
+
+- 主键：生词用 `uid`（老数据升级时自动补 UUID）；进度用**书名**（`Book.id` 是本机路径编码，跨设备不同）
+- 阅读页启动时会 `awaitInitialSync()` 短暂等同步结束，保证生词高亮与云端一致
+- 同步码 `LR1.<base64>` 内含口令，**云端只有密文**；同一同步码即同一个用户目录
 
 ### 点词查词
 

@@ -122,6 +122,9 @@ $adb = "E:\Android_Sdk\platform-tools\adb.exe"
 | 点词无释义 | 断点 `DictDatabase.lookup()`；看 logcat 有无 SQLite 异常；确认 APK 内 db 未压缩（`noCompress += listOf("db","min.db")`） |
 | 点词不发音 | 先看**设置 → 发音 → 发音自检**：显示「已切换在线发音」= 设备没装系统语音引擎（模拟器常见），属预期兜底；显示系统引擎却仍无声 → logcat 搜 `SpeechManager`，再查媒体音量与系统 TTS 设置 |
 | 音色不好听 / 手机平板发音不一致 | **设置 → 发音 → 语音引擎**里两台设备选同一个引擎即可统一；列表里没有目标引擎时，先在系统里装好（ColorOS：设置 → 无障碍 → 文字转语音设置）再回来点「刷新」。临时方案：打开「始终使用在线发音」 |
+| 云同步失败 | 看设置页提示的 HTTP 码：401/403 = token 权限不足（需要 Contents: Read and write）；404 = 仓库名 / 分支写错；409/422 = 两端同时同步（代码会自动重拉合并）。提示「同步码不正确」= 加密口令对不上（口令在码里，别手抄，用「复制」粘贴） |
+| 退出再进从头开始读 | 进度存在 `bookshelf.json`（`lastChapterIndex` + `lastScrollY` 复用作页码）。翻页 / 切章后防抖 800ms 写盘、离开页面再兜一次；若仍丢，看 logcat 是否有写盘异常（存储权限 / 磁盘满） |
+| 目录条目少 / 章节名不对 | 目录来自 EPUB 的 `toc.ncx` / `nav.xhtml`：条目缺失多为锚点没去 fragment，标题错位多为同一文件被父子两条引用（应取最深一条）。可 `unzip -p book.epub EPUB/toc.ncx` 对照排查；txt/fb2 无目录，回退为章节列表 |
 | 引擎下载后没出现在「语音引擎」列表 | 要先点「安装」并在系统弹窗确认（Android 不允许静默安装）；装完点「刷新」重新枚举。arm64 包只能装在 arm64 设备上 |
 | 补充词典下载后查不到 | 当前版本会自动热探测（`supStamp` 指纹），无需重启；仍无效时看 `filesDir/ecdict.db` 是否完整（133,664,768 B）与 logcat 有无 SQLite 异常 |
 | 翻译失败 | `TranslationEngines.translate()` 只走**首个已配置**引擎；未填 Key 返回 `success=false`；logcat 搜 `okhttp` |

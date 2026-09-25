@@ -63,7 +63,11 @@ object VocabExporter {
                 w.interval.toString(),
                 formatEf(w.easiness),
                 w.grade.toString(),
-                fmtDate(w.nextReview)
+                fmtDate(w.nextReview),
+                // ---- 跨设备同步元数据（旧版 CSV 没有这三列，导入时按 word+sentence 补稳定 uid）----
+                w.uid,
+                w.updatedAt.toString(),
+                if (w.deleted) "1" else "0"
             )
             sb.append(row.joinToString(",") { csvCell(it) }).append("\r\n")
         }
@@ -93,10 +97,127 @@ object VocabExporter {
                 put("easiness", w.easiness)
                 put("grade", w.grade)
                 put("nextReview", w.nextReview)
+                put("uid", w.uid)
+                put("updatedAt", w.updatedAt)
+                put("deleted", w.deleted)
             })
         }
         root.put("words", arr)
         return root.toString(2)
+    }
+
+    // ------------------------------------------------------------------
+    // 导入 / 同步：CSV → VocabWord
+    // ------------------------------------------------------------------
+
+    /**
+     * 解析 CSV：**兼容旧版 13 列**，按表头名取列（不依赖列顺序），未知列自动忽略。
+     *
+     * 缺少 `uid` 时用 `word + sentence` 算出**稳定 uid** —— 两台设备导入同一份旧 CSV
+     * 会得到相同的 uid，合并时不会重复成两条。
+     */
+    fun parseCsv(text: String): List<VocabWord> {
+        val rows = splitCsv(text.removePrefix("\uFEFF"))
+        if (rows.size < 2) return emptyList()
+        val idx = HashMap<String, Int>()
+        rows.first().forEachIndexed { i, name ->
+            val key = name.trim().lowercase()
+            if (key.isNotEmpty()) idx.putIfAbsent(key, i)
+        }
+
+        fun col(cols: List<String>, name: String): String =
+            idx[name]?.let { cols.getOrNull(it)?.trim().orEmpty() } ?: ""
+
+        val out = ArrayList<VocabWord>(rows.size - 1)
+        rows.drop(1).forEach { cols ->
+            val word = col(cols, "word")
+            if (word.isEmpty()) return@forEach
+            val sentence = col(cols, "sentence")
+            out.add(
+                VocabWord(
+                    word = word,
+                    meaning = col(cols, "meaning"),
+                    phonetic = col(cols, "phonetic"),
+                    sentence = sentence,
+                    sourceBook = col(cols, "source_book"),
+                    level = col(cols, "level"),
+                    addDate = parseDateOr(col(cols, "add_date"), System.currentTimeMillis()),
+                    repetition = col(cols, "repetition").toIntOrNull() ?: 0,
+                    interval = col(cols, "interval_days").toIntOrNull() ?: 0,
+                    easiness = col(cols, "easiness").toDoubleOrNull() ?: 2.5,
+                    grade = col(cols, "grade").toIntOrNull() ?: 0,
+                    nextReview = parseDateOr(col(cols, "next_review"), System.currentTimeMillis()),
+                    uid = col(cols, "uid").ifBlank { stableUid(word, sentence) },
+                    updatedAt = col(cols, "updated_at").toLongOrNull()
+                        ?: parseDateOr(col(cols, "add_date"), 0L),
+                    deleted = col(cols, "deleted") == "1"
+                )
+            )
+        }
+        return out
+    }
+
+    /** 旧版 CSV 的日期是 `yyyy-MM-dd HH:mm`，同步列是毫秒时间戳；都解析不出来时用 [fallback] */
+    private fun parseDateOr(raw: String, fallback: Long): Long {
+        if (raw.isBlank()) return fallback
+        raw.toLongOrNull()?.let { return it }
+        return try {
+            SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).parse(raw)?.time ?: fallback
+        } catch (e: Exception) {
+            fallback
+        }
+    }
+
+    /** 旧 CSV 没有 uid 时的稳定替代：同一个 (word, sentence) 在任何设备上算出的 uid 都相同 */
+    private fun stableUid(word: String, sentence: String): String {
+        val h = java.security.MessageDigest.getInstance("MD5")
+            .digest("$word|$sentence".toByteArray(Charsets.UTF_8))
+        return h.joinToString("") { "%02x".format(it) }
+    }
+
+    /** 最小 CSV 解析：支持引号包裹、`""` 转义、字段内逗号与换行、CRLF */
+    private fun splitCsv(text: String): List<List<String>> {
+        val rows = ArrayList<List<String>>()
+        var row = ArrayList<String>()
+        val sb = StringBuilder()
+        var inQuotes = false
+        var i = 0
+        while (i < text.length) {
+            val c = text[i]
+            when {
+                inQuotes -> when {
+                    c == '"' && i + 1 < text.length && text[i + 1] == '"' -> {
+                        sb.append('"')
+                        i++
+                    }
+
+                    c == '"' -> inQuotes = false
+                    else -> sb.append(c)
+                }
+
+                c == '"' -> inQuotes = true
+                c == ',' -> {
+                    row.add(sb.toString())
+                    sb.setLength(0)
+                }
+
+                c == '\r' -> Unit
+                c == '\n' -> {
+                    row.add(sb.toString())
+                    sb.setLength(0)
+                    if (row.any { it.isNotBlank() }) rows.add(row)
+                    row = ArrayList()
+                }
+
+                else -> sb.append(c)
+            }
+            i++
+        }
+        if (sb.isNotEmpty() || row.isNotEmpty()) {
+            row.add(sb.toString())
+            if (row.any { it.isNotBlank() }) rows.add(row)
+        }
+        return rows
     }
 
     private fun formatEf(v: Double): String = String.format(Locale.US, "%.2f", v)
@@ -111,9 +232,10 @@ object VocabExporter {
 
     private val CSV_HEADER = listOf(
         "word", "phonetic", "pos", "meaning", "sentence", "source_book", "level",
-        "add_date", "repetition", "interval_days", "easiness", "grade", "next_review"
+        "add_date", "repetition", "interval_days", "easiness", "grade", "next_review",
+        "uid", "updated_at", "deleted"
     )
 
-    /** 导出格式版本；追加字段时 +1，删除/改名需另行说明 */
-    const val SCHEMA_VERSION = 1
+    /** 导出格式版本；2 = 追加跨设备同步列 uid / updated_at / deleted */
+    const val SCHEMA_VERSION = 2
 }

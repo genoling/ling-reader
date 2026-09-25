@@ -12,8 +12,8 @@ android {
         applicationId = "com.lreader"
         minSdk = 24
         targetSdk = 33
-        versionCode = 13
-        versionName = "1.3.0"
+        versionCode = 15
+        versionName = "1.5.0"
     }
 
     buildTypes {

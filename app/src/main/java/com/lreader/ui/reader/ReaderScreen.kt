@@ -13,11 +13,14 @@ import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material3.*
@@ -38,6 +41,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -52,10 +56,13 @@ import com.lreader.model.Book
 import com.lreader.model.Chapter
 import com.lreader.model.ChapterImage
 import com.lreader.model.DictEntry
+import com.lreader.model.TocEntry
 import com.lreader.model.TranslationResult
 import com.lreader.speech.SpeechManager
+import com.lreader.sync.SyncManager
 import com.lreader.translate.TranslationEngines
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -96,6 +103,11 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
     var pageIndex by remember { mutableStateOf(0) }
     var showParams by remember { mutableStateOf(false) }
     var showDetail by remember { mutableStateOf(false) }
+    var showToc by remember { mutableStateOf(false) }
+    /** 目录（EPUB 自带 ncx / nav，含层级）；为空时面板回退成章节列表 */
+    var tocList by remember { mutableStateOf<List<TocEntry>>(emptyList()) }
+    /** 跨设备同步来的章内百分比（<0 = 不用）；页码无效时按它定位 */
+    var restorePercent by remember { mutableStateOf(-1f) }
 
     // 查词
     var selectedWord by remember { mutableStateOf<String?>(null) }
@@ -119,6 +131,12 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
         if (b != null) {
             chapters = withContext(Dispatchers.IO) { BookParser.loadChapters(b) }
             chapterIndex = b.lastChapterIndex.coerceIn(0, (chapters.size - 1).coerceAtLeast(0))
+            // 章内页码同样要恢复（复用 lastScrollY 存页码）：只恢复章号会「翻过的页白翻了」
+            pageIndex = b.lastScrollY.coerceAtLeast(0)
+            // 没有本机页码、却有百分比 → 说明进度是从别的设备同步来的，交给阅读页按比例定位
+            restorePercent = if (b.lastScrollY <= 0 && b.lastPercent > 0f) b.lastPercent else -1f
+            // 目录（含层级），与章节用同一份解析结果，避免点击后跳错章
+            tocList = BookParser.loadToc(b, chapters)
         }
 
         // 词典 + 分级库 + TTS
@@ -134,6 +152,8 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
         speech.rate = settings.speechRate
         speech.init()
 
+        // 等启动时的云同步跑完（最多几秒）：否则刚进 App 就点进书时，生词高亮用的是同步前的旧数据
+        withContext(Dispatchers.IO) { SyncManager.awaitInitialSync() }
         // 统一小写，保证「生词红色高亮」与正文大小写无关
         vocabWords = withContext(Dispatchers.IO) { vocab.all().map { it.word.lowercase() }.toSet() }
 
@@ -150,13 +170,26 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
             if (i >= 0) {
                 list[i] = list[i].copy(
                     lastChapterIndex = chapterIndex,
-                    // 复用既有字段记录页码，不改数据库结构
-                    lastScrollY = pageIndex
+                    // 本机用它精确回到同一页
+                    lastScrollY = pageIndex,
+                    // 跨设备同步的是「章节 + 百分比」：页码换个字号/屏幕就变了，传出去没意义
+                    lastPercent = if (pages.isEmpty()) 0f else (pageIndex + 1f) / pages.size,
+                    progressUpdatedAt = System.currentTimeMillis()
                 )
                 repo.save(list)
             }
         } catch (_: Exception) {
         }
+    }
+
+    // 翻页 / 切章后自动保存（防抖 800ms），退出页面时再兜一次 —— 否则「退出再进」会丢进度
+    LaunchedEffect(chapterIndex, pageIndex) {
+        if (chapters.isEmpty()) return@LaunchedEffect
+        delay(800)
+        saveProgress()
+    }
+    DisposableEffect(Unit) {
+        onDispose { saveProgress() }
     }
 
     Scaffold(
@@ -189,6 +222,10 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
                         modifier = Modifier.padding(end = 2.dp),
                         color = MaterialTheme.colorScheme.primary
                     )
+                    // 目录（EPUB 的 ncx / nav，txt 则是章节列表）
+                    IconButton(onClick = { showToc = true }) {
+                        Icon(Icons.Filled.List, contentDescription = "目录")
+                    }
                     // 阅读中直接开关分级高亮
                     IconButton(onClick = { showLevelDialog = true }) {
                         Icon(Icons.Filled.Palette, contentDescription = "高亮级别")
@@ -245,6 +282,9 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
                     chapterKey = "$bookId#$chapterIndex#$fontSize#$lineHeight",
                     text = chapters[chapterIndex].content,
                     images = chapters[chapterIndex].images,
+                    // 定位到上次读到的页码（首次进入为 0）；页码无效时用 restorePercent
+                    initialPage = pageIndex,
+                    initialPercent = restorePercent,
                     theme = theme,
                     enabledLevels = enabledLevels,
                     levels = levels,
@@ -257,6 +297,15 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
                     onPagesReady = { pages = it },
                     onPageChanged = { pageIndex = it },
                     onPullDown = { showParams = true },
+                    // 书内超链接（EPUB 目录页 / 栏目页）→ 跳到目标章节
+                    onInternalLink = { target ->
+                        val idx = chapters.indexOfFirst { it.sourcePath == target }
+                        if (idx >= 0 && idx != chapterIndex) {
+                            chapterIndex = idx
+                            pageIndex = 0
+                            saveProgress()
+                        }
+                    },
                     hasPrevChapter = chapterIndex > 0,
                     hasNextChapter = chapterIndex < chapters.size - 1,
                     onPrevChapter = {
@@ -314,6 +363,55 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
                         modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
                         fontSize = 12.sp
                     )
+                }
+            }
+        }
+    }
+
+    // ---------- 目录 ----------
+    val tocItems = remember(tocList, chapters) {
+        // 优先用 EPUB 自带目录（含父子层级）；txt 没有目录信息时回退成章节列表
+        if (tocList.isNotEmpty()) tocList
+        else chapters.map { TocEntry(it.title, it.index, 0) }
+    }
+    if (showToc) {
+        ModalBottomSheet(onDismissRequest = { showToc = false }) {
+            Text(
+                "目录",
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(start = 20.dp, bottom = 6.dp)
+            )
+            LazyColumn(Modifier.fillMaxWidth().heightIn(max = 520.dp)) {
+                items(tocItems) { entry ->
+                    val current = entry.chapterIndex == chapterIndex
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                chapterIndex = entry.chapterIndex
+                                pageIndex = 0
+                                saveProgress()
+                                showToc = false
+                            }
+                            .padding(
+                                start = (16 + entry.level.coerceIn(0, 2) * 18).dp,
+                                end = 16.dp,
+                                top = 12.dp,
+                                bottom = 12.dp
+                            )
+                    ) {
+                        Text(
+                            entry.title,
+                            fontSize = if (entry.level == 0) 14.sp else 13.sp,
+                            fontWeight = if (entry.level == 0) FontWeight.Medium else FontWeight.Normal,
+                            color = if (current) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurface,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
                 }
             }
         }
@@ -566,6 +664,10 @@ private fun WordText(
     skipBasic: Boolean,
     fontSize: Float,
     lineHeight: Float,
+    /** 标题类块加粗 */
+    bold: Boolean = false,
+    /** 栏目 / 引用类块用次要色 */
+    dim: Boolean = false,
     theme: ReadingTheme,
     onWordClick: (String, String) -> Unit,
     onLongPressSentence: (String) -> Unit,
@@ -619,8 +721,8 @@ private fun WordText(
 
     Text(
         text = annotated,
+        // 高度由内容决定（不要 fillMaxSize：图文混排时它会把同页的插图挤出屏幕）
         modifier = modifier
-            .fillMaxSize()
             .pointerInput(annotated, layout) {
                 val lr = layout ?: return@pointerInput
                 awaitEachGesture {
@@ -650,7 +752,8 @@ private fun WordText(
         style = TextStyle(
             fontSize = fontSize.sp,
             lineHeight = lineHeight.sp,
-            color = theme.text
+            fontWeight = if (bold) FontWeight.Bold else FontWeight.Normal,
+            color = if (dim) theme.secondaryText else theme.text
         )
     )
 }
@@ -689,33 +792,202 @@ private fun sentenceOf(text: String, offset: Int): String {
 // 分页阅读
 // ---------------------------------------------------------------------------
 
-/**
- * 按「每页行数」把整章文本切片成多页。
- * 全部在行首处切分，保证每页内部的换行与原排版一致。
- */
-private fun paginate(text: String, layout: TextLayoutResult, linesPerPage: Int): List<String> {
-    if (text.isEmpty()) return listOf("")
-    if (layout.lineCount <= 0) return listOf(text)
-    val out = ArrayList<String>()
-    var startLine = 0
-    while (startLine < layout.lineCount) {
-        val endLine = minOf(startLine + linesPerPage, layout.lineCount)
-        val start = layout.getLineStart(startLine)
-        val end = if (endLine >= layout.lineCount) text.length else layout.getLineStart(endLine)
-        if (end > start) out.add(text.substring(start, end))
-        startLine = endLine
-    }
-    return out.ifEmpty { listOf(text) }
-}
+/** 插图最多占页面高度的比例，其余留给同段的文字 */
+private const val IMAGE_MAX_PAGE_RATIO = 0.62f
 
 /**
- * 阅读页的一页：正文页（走 [WordText]，带点词与分级高亮）或**插图页**。
- * EPUB 的插图会作为独立一页，插在它原本所在的正文位置后面。
+ * 正文块层级：来自 HTML 的 `h1/h2/h3/h4~h6/blockquote/普通段落`。
+ *
+ * 拍平成纯文本时这些层级会丢失（全文一个字号）；带上标记后按 [scale] 放大/缩小，
+ * 与纸质书、官方阅读器的观感一致（标题大而粗、正文常规、栏目/引用次要色）。
  */
-private sealed interface ReaderPage {
-    data class Text(val text: String) : ReaderPage
-    data class Image(val image: ChapterImage) : ReaderPage
+private enum class BlockKind(val scale: Float, val bold: Boolean, val dim: Boolean = false) {
+    TITLE(1.55f, true),          // h1
+    SUBTITLE(1.25f, true),       // h2
+    SECTION(1.10f, true),        // h3
+    MINOR(1.00f, true, dim = true), // h4~h6
+    QUOTE(0.96f, false, dim = true), // blockquote
+    BODY(1f, false)
 }
+
+/** 一段文字里的一个排版块（插图不在这里，由调用方按段序单独插入） */
+private data class TextBlock(
+    val text: String,
+    val kind: BlockKind,
+    /** 内部链接目标（zip 内路径）；非空表示这一块整体是超链接，点击跳章 */
+    val link: String? = null
+)
+
+/**
+ * 把带层级标记的正文解析成块序列（标记见 `BookParser.MARK_*`）。
+ *
+ * 规则：标记开启一个新块并记住类型；连续两个换行结束当前块；类型回到正文。
+ * 没有标记的文本（TXT 书、旧缓存）会整体成为正文块，行为与改造前一致。
+ */
+private fun parseBlocks(seg: String): List<TextBlock> {
+    val out = ArrayList<TextBlock>()
+    val buf = StringBuilder()
+    var kind = BlockKind.BODY
+
+    /** 链接解析状态（标记见 `BookParser.MARK_LINK*`） */
+    var linkTarget: String? = null
+    var linkText: String? = null
+    var targetBuf: StringBuilder? = null
+    var labelBuf: StringBuilder? = null
+
+    fun flush() {
+        val t = buf.toString().trim()
+        if (t.isNotEmpty()) {
+            // 只有「整块内容就是这个链接」才算超链接；正文里混排的链接退化为普通文字，
+            // 否则会把整段都染成链接色（列表项 "• Leaders" 这类是列表符号 + 链接，仍算链接）
+            val link = linkTarget?.takeIf { linkText != null && t.endsWith(linkText!!) }
+            out.add(TextBlock(t, kind, link))
+        }
+        buf.setLength(0)
+        kind = BlockKind.BODY
+        linkTarget = null
+        linkText = null
+    }
+
+    /** 结束当前块并以新层级开启下一块（赋值不能直接作为 `when` 分支体） */
+    fun begin(k: BlockKind) {
+        flush()
+        kind = k
+    }
+
+    for (c in seg) {
+        when {
+            c == '\n' -> if (buf.isNotEmpty() && buf.last() == '\n') flush() else buf.append(c)
+            // 链接标记：不切块，让「• 」这类前缀与链接文字待在同一块里
+            c == BookParser.MARK_LINK -> targetBuf = StringBuilder()
+            c == BookParser.MARK_LINK_TEXT -> {
+                linkTarget = targetBuf?.toString()
+                targetBuf = null
+                labelBuf = StringBuilder()
+            }
+
+            c == BookParser.MARK_LINK_END -> {
+                linkText = labelBuf?.toString()?.trim()
+                labelBuf = null
+            }
+
+            c == BookParser.MARK_TITLE -> begin(BlockKind.TITLE)
+            c == BookParser.MARK_SUBTITLE -> begin(BlockKind.SUBTITLE)
+            c == BookParser.MARK_SECTION -> begin(BlockKind.SECTION)
+            c == BookParser.MARK_MINOR -> begin(BlockKind.MINOR)
+            c == BookParser.MARK_QUOTE -> begin(BlockKind.QUOTE)
+            targetBuf != null -> targetBuf.append(c)
+            else -> {
+                buf.append(c)
+                if (linkTarget != null) labelBuf?.append(c)
+            }
+        }
+    }
+    flush()
+    return out
+}
+
+/** 块样式：测量与渲染必须用同一份（字号/行高/字重），否则分页会与实际排版对不上 */
+private fun blockStyle(kind: BlockKind, fontSize: Float, lineHeight: Float, theme: ReadingTheme) =
+    TextStyle(
+        fontSize = (fontSize * kind.scale).sp,
+        lineHeight = (lineHeight * kind.scale).sp,
+        fontWeight = if (kind.bold) FontWeight.Bold else FontWeight.Normal,
+        color = if (kind.dim) theme.secondaryText else theme.text
+    )
+
+/** 页内内容块：文字段或插图（**按原文顺序混排**，与杂志/书的版式一致） */
+private sealed interface PageBlock {
+    data class Text(
+        val text: String,
+        val kind: BlockKind = BlockKind.BODY,
+        /** 非空表示整块是内部链接（点击跳章） */
+        val link: String? = null
+    ) : PageBlock
+    /** [heightPx] 是本页该图的实际显示高度（按正文宽度等比算出，分页时已计入） */
+    data class Image(val image: ChapterImage, val heightPx: Float) : PageBlock
+}
+
+/** 阅读页：一页由若干块组成，文字与插图交错排列 */
+private data class ReaderPage(val blocks: List<PageBlock>)
+
+/**
+ * 图文混排分页：按像素高度把「文字块 + 插图」装进一页，装不下就换页。
+ *
+ * 文字块带层级（见 [BlockKind]），每块按**自己的行高**累加占位，因此标题行更大。
+ * 插图不独占一页，而是接在它原本所在的文字后面（如「导语 → 图片 → 正文」）。
+ *
+ * @param blocksPerSeg 先按 [BookParser.IMG_MARK] 切段、再各自解析成的块序列；段 i 之后是第 i 张图
+ * @param layouts      各文字块的排版结果，key = [layoutKey]
+ * @param imageHeights 各图在正文宽度下的高度（px）
+ */
+private fun paginateFlow(
+    blocksPerSeg: List<List<TextBlock>>,
+    images: List<ChapterImage>,
+    layouts: Map<Long, TextLayoutResult>,
+    imageHeights: Map<Int, Float>,
+    pageHeight: Float,
+    lineHeight: Float
+): List<ReaderPage> {
+    val pages = ArrayList<ReaderPage>()
+    var blocks = ArrayList<PageBlock>()
+    var used = 0f
+
+    fun flush() {
+        if (blocks.isNotEmpty()) {
+            pages.add(ReaderPage(blocks))
+            blocks = ArrayList()
+            used = 0f
+        }
+    }
+
+    for (si in blocksPerSeg.indices) {
+        blocksPerSeg[si].forEachIndexed { bi, tb ->
+            val lr = layouts[layoutKey(si, bi)] ?: return@forEachIndexed
+            if (tb.text.isEmpty() || lr.lineCount <= 0) return@forEachIndexed
+            // 该块的行高（标题字号大 → 行高也大）：取排版结果第一行的实际高度
+            val blockLine = (lr.getLineBottom(0) - lr.getLineTop(0)).toFloat()
+                .takeIf { it > 0f } ?: (lineHeight * tb.kind.scale)
+            var startLine = 0
+            while (startLine < lr.lineCount) {
+                var room = (pageHeight - used) / blockLine
+                if (room < 1f) {
+                    flush()
+                    room = pageHeight / blockLine
+                }
+                val canLines = room.toInt().coerceAtLeast(1)
+                val endLine = minOf(startLine + canLines, lr.lineCount)
+                val start = lr.getLineStart(startLine)
+                val end = if (endLine >= lr.lineCount) tb.text.length else lr.getLineStart(endLine)
+                if (end > start) {
+                    blocks.add(PageBlock.Text(tb.text.substring(start, end), tb.kind, tb.link))
+                    used += (endLine - startLine) * blockLine
+                }
+                startLine = endLine
+                if (startLine < lr.lineCount) flush()
+            }
+        }
+
+        // 段 si 后面的那张图：跟着文字一起排，装不下才换页
+        val img = images.getOrNull(si) ?: continue
+        val h = (imageHeights[si] ?: 0f).takeIf { it > 0f } ?: (lineHeight * 3)
+        if (h >= pageHeight) {
+            // 竖长图 / 封面：比一页还高时独占一页，整页等比显示
+            flush()
+            pages.add(ReaderPage(listOf(PageBlock.Image(img, pageHeight))))
+        } else {
+            if (used + h > pageHeight) flush()
+            blocks.add(PageBlock.Image(img, h))
+            used += h
+        }
+    }
+    flush()
+    return pages.ifEmpty { listOf(ReaderPage(listOf(PageBlock.Text("")))) }
+}
+
+/** 文字块排版结果的 key：把「段序号 + 块序号」打平成一个 Long，避免嵌套 Map */
+private fun layoutKey(segIndex: Int, blockIndex: Int): Long =
+    segIndex.toLong() * 1000L + blockIndex
 
 /**
  * 分页阅读器：左右滑动翻页、下拉调参、点击查词、长按整句翻译。
@@ -731,6 +1003,10 @@ private fun PagedReader(
     text: String,
     /** 本章插图，与 [text] 里的 `\uFFFC` 占位符按顺序对应 */
     images: List<ChapterImage>,
+    /** 上次读到的页码；进入本章时定位到该页 */
+    initialPage: Int,
+    /** 跨设备同步来的章内百分比（0~1，<0 表示不可用）；页码无效时按它定位 */
+    initialPercent: Float,
     theme: ReadingTheme,
     enabledLevels: Set<String>,
     levels: LevelDictionary,
@@ -748,35 +1024,65 @@ private fun PagedReader(
     onPrevChapter: () -> Unit,
     onNextChapter: () -> Unit,
     onWordClick: (String, String) -> Unit,
-    onLongPressSentence: (String) -> Unit
+    onLongPressSentence: (String) -> Unit,
+    /** 点击书内超链接（目录页 / 栏目页）→ 带上目标文件路径 */
+    onInternalLink: (String) -> Unit
 ) {
     val density = LocalDensity.current
     var pages by remember(chapterKey) { mutableStateOf<List<ReaderPage>>(emptyList()) }
-    // 含插图时按占位符切段、逐段测量（每段一个透明 Text）
-    var segLayouts by remember(chapterKey) { mutableStateOf<Map<Int, TextLayoutResult>>(emptyMap()) }
+    // 每段解析成「带层级的块」后逐块测量（每块一个透明 Text）
+    var segLayouts by remember(chapterKey) { mutableStateOf<Map<Long, TextLayoutResult>>(emptyMap()) }
 
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val pageHeightPx = with(density) { (maxHeight - 26.dp).toPx() }
         val lineHeightPx = with(density) { lineHeight.sp.toPx() }
-        val perPage = maxOf(1, (pageHeightPx / lineHeightPx).toInt())
+        // 正文可用宽度（左右各 18dp 内边距）——插图按它等比换算显示高度
+        val contentWidthPx = with(density) { (maxWidth - 36.dp).toPx() }
 
         // 分页结果同步给父级；放在 LaunchedEffect 里，避免在 layout 阶段写 state
         LaunchedEffect(pages) { if (pages.isNotEmpty()) onPagesReady(pages) }
 
-        // 没插图就是整章文本；有插图时按 IMG_MARK 切段（段数 = 图数 + 1）
+        // 没插图就是整章文本；有插图时按 IMG_MARK 切段（段数 = 图数 + 1），再逐段解析成带层级的块
         val segments = remember(chapterKey, text, images) {
             if (images.isEmpty()) listOf(text) else text.split(BookParser.IMG_MARK)
         }
+        val blocksPerSeg = remember(segments) { segments.map { parseBlocks(it) } }
+        val textBlockCount = remember(blocksPerSeg) {
+            blocksPerSeg.sumOf { seg -> seg.count { it.text.isNotEmpty() } }
+        }
 
-        // 逐段测量完成后拼装页序列：段0 的页 → 图0 → 段1 的页 → 图1 → …
-        LaunchedEffect(segLayouts, segments, perPage) {
-            if (segLayouts.size < segments.size) return@LaunchedEffect
-            val built = ArrayList<ReaderPage>()
-            segments.forEachIndexed { i, seg ->
-                val lr = segLayouts[i] ?: return@forEachIndexed
-                paginate(seg, lr, perPage).forEach { built.add(ReaderPage.Text(it)) }
-                images.getOrNull(i)?.let { built.add(ReaderPage.Image(it)) }
+        // 插图尺寸：只读图片头部（inJustDecodeBounds，不真正解码像素），再按正文宽度等比换算
+        var imageHeights by remember(chapterKey) { mutableStateOf<Map<Int, Float>>(emptyMap()) }
+        LaunchedEffect(chapterKey, images, contentWidthPx, segments, pageHeightPx) {
+            if (images.isEmpty() || contentWidthPx <= 0f) return@LaunchedEffect
+            imageHeights = withContext(Dispatchers.IO) {
+                // 本章几乎只有一张图（封面、整页海报）时放宽高度，让它尽量铺满；正文插图则限高，
+                // 否则宽屏上图片会撑满整页、把同段文字全挤到下一页，失去「图文混排」的观感
+                val textChars = segments.sumOf { s -> s.count { !it.isWhitespace() } }
+                val ratio = if (textChars < 80) 0.94f else IMAGE_MAX_PAGE_RATIO
+                images.mapIndexedNotNull { i, img ->
+                    if (img.path.isBlank()) return@mapIndexedNotNull null
+                    val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    BitmapFactory.decodeFile(img.path, opts)
+                    if (opts.outWidth <= 0 || opts.outHeight <= 0) return@mapIndexedNotNull null
+                    val raw = contentWidthPx * opts.outHeight / opts.outWidth
+                    i to raw.coerceAtMost(pageHeightPx * ratio)
+                }.toMap()
             }
+        }
+
+        // 文字测量 + 图片尺寸都就绪后拼装页序列（文字与插图混排）
+        LaunchedEffect(segLayouts, imageHeights, blocksPerSeg, images, pageHeightPx, textBlockCount) {
+            if (segLayouts.size < textBlockCount) return@LaunchedEffect
+            if (images.isNotEmpty() && imageHeights.isEmpty()) return@LaunchedEffect
+            val built = paginateFlow(
+                blocksPerSeg = blocksPerSeg,
+                images = images,
+                layouts = segLayouts,
+                imageHeights = imageHeights,
+                pageHeight = pageHeightPx,
+                lineHeight = lineHeightPx
+            )
             if (built.isNotEmpty()) pages = built
         }
 
@@ -788,17 +1094,36 @@ private fun PagedReader(
                     .padding(horizontal = 18.dp, vertical = 12.dp)
                     .alpha(0f)
             ) {
-                segments.forEachIndexed { i, seg ->
-                    Text(
-                        text = seg,
-                        style = TextStyle(fontSize = fontSize.sp, lineHeight = lineHeight.sp),
-                        modifier = Modifier.fillMaxWidth(),
-                        onTextLayout = { lr -> segLayouts = segLayouts + (i to lr) }
-                    )
+                blocksPerSeg.forEachIndexed { si, segBlocks ->
+                    segBlocks.forEachIndexed { bi, tb ->
+                        if (tb.text.isNotEmpty()) {
+                            Text(
+                                text = tb.text,
+                                // 与渲染用同一份样式，否则测出的行数与实际排版对不上
+                                style = blockStyle(tb.kind, fontSize, lineHeight, theme),
+                                modifier = Modifier.fillMaxWidth(),
+                                onTextLayout = { lr ->
+                                    segLayouts = segLayouts + (layoutKey(si, bi) to lr)
+                                }
+                            )
+                        }
+                    }
                 }
             }
         } else {
-            var idx by remember(chapterKey) { mutableStateOf(0) }
+            var idx by remember(chapterKey) { mutableStateOf(initialPage.coerceAtLeast(0)) }
+            var percentApplied by remember(chapterKey) { mutableStateOf(false) }
+            // 分页是异步的：页数就绪后再校正定位
+            LaunchedEffect(pages.size) {
+                if (pages.isEmpty()) return@LaunchedEffect
+                if (idx > pages.lastIndex) idx = 0
+                // 没有本机页码（例如进度是从别的设备同步来的）→ 用百分比换算成页码
+                if (!percentApplied && initialPage <= 0 && initialPercent in 0.01f..1f) {
+                    idx = (initialPercent * pages.size).toInt().coerceIn(0, pages.lastIndex)
+                    percentApplied = true
+                    onPageChanged(idx)
+                }
+            }
             LaunchedEffect(idx) {
                 onPageChanged(idx)
             }
@@ -836,31 +1161,56 @@ private fun PagedReader(
                         )
                     }
             ) { i ->
-                when (val page = pages[i.coerceIn(0, pages.size - 1)]) {
-                    is ReaderPage.Text -> WordText(
-                        text = page.text,
-                        enabledLevels = enabledLevels,
-                        levels = levels,
-                        levelsReady = levelsReady,
-                        vocabWords = vocabWords,
-                        highlightVocab = highlightVocab,
-                        skipBasic = skipBasic,
-                        fontSize = fontSize,
-                        lineHeight = lineHeight,
-                        theme = theme,
-                        onWordClick = onWordClick,
-                        onLongPressSentence = onLongPressSentence,
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(horizontal = 18.dp, vertical = 12.dp)
-                    )
+                val page = pages[i.coerceIn(0, pages.size - 1)]
+                // 一页内的块按原文顺序纵向排列：文字走 WordText（点词 / 分级高亮），插图走 ChapterImageView
+                Column(
+                    Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 18.dp, vertical = 12.dp)
+                ) {
+                    page.blocks.forEach { block ->
+                        when (block) {
+                            is PageBlock.Text -> {
+                                val target = block.link
+                                if (target != null) {
+                                    // EPUB 目录页 / 栏目页里的链接：整行可点击跳章
+                                    LinkLine(
+                                        text = block.text,
+                                        kind = block.kind,
+                                        fontSize = fontSize,
+                                        lineHeight = lineHeight,
+                                        theme = theme,
+                                        onClick = { onInternalLink(target) }
+                                    )
+                                } else {
+                                    WordText(
+                                        text = block.text,
+                                        enabledLevels = enabledLevels,
+                                        levels = levels,
+                                        levelsReady = levelsReady,
+                                        vocabWords = vocabWords,
+                                        highlightVocab = highlightVocab,
+                                        skipBasic = skipBasic,
+                                        // 按块层级放大/缩小字号（H1 > H2 > H3 > 正文）
+                                        fontSize = fontSize * block.kind.scale,
+                                        lineHeight = lineHeight * block.kind.scale,
+                                        bold = block.kind.bold,
+                                        dim = block.kind.dim,
+                                        theme = theme,
+                                        onWordClick = onWordClick,
+                                        onLongPressSentence = onLongPressSentence,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
+                            }
 
-                    is ReaderPage.Image -> ImagePage(
-                        image = page.image,
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(horizontal = 18.dp, vertical = 12.dp)
-                    )
+                            is PageBlock.Image -> ChapterImageView(
+                                image = block.image,
+                                heightPx = block.heightPx,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -868,12 +1218,42 @@ private fun PagedReader(
 }
 
 /**
- * 插图页：整页居中等比显示一张 EPUB 插图。
+ * 书内超链接行（EPUB 的目录页 / 栏目页）：整块可点击跳转，蓝色 + 下划线。
+ *
+ * 样式与 [blockStyle] 同源（字号/行高一致），避免与实际测量结果对不上。
+ */
+@Composable
+private fun LinkLine(
+    text: String,
+    kind: BlockKind,
+    fontSize: Float,
+    lineHeight: Float,
+    theme: ReadingTheme,
+    onClick: () -> Unit
+) {
+    Text(
+        text = text,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        style = blockStyle(kind, fontSize, lineHeight, theme).copy(
+            color = MaterialTheme.colorScheme.primary,
+            textDecoration = TextDecoration.Underline
+        )
+    )
+}
+
+/**
+ * 章节插图：**内联在正文中**，按分页时算好的 [heightPx] 占位显示（不跳动）。
  *
  * 大图统一降采样解码（RGB_565）以免 OOM；图片缺失时显示「［图片］+ alt」占位，翻页不受影响。
  */
 @Composable
-private fun ImagePage(image: ChapterImage, modifier: Modifier = Modifier) {
+private fun ChapterImageView(
+    image: ChapterImage,
+    heightPx: Float,
+    modifier: Modifier = Modifier
+) {
     val bitmap by produceState<Bitmap?>(initialValue = null, image.path) {
         value = withContext(Dispatchers.IO) {
             if (image.path.isBlank()) return@withContext null
@@ -893,13 +1273,21 @@ private fun ImagePage(image: ChapterImage, modifier: Modifier = Modifier) {
         }
     }
 
-    Box(modifier, contentAlignment = Alignment.Center) {
+    val height = with(LocalDensity.current) { heightPx.toDp() }
+    Box(
+        modifier
+            .height(height)
+            .padding(vertical = 6.dp),
+        contentAlignment = Alignment.Center
+    ) {
         val bmp = bitmap
         if (bmp != null) {
             Image(
                 bitmap = bmp.asImageBitmap(),
                 contentDescription = image.alt.ifBlank { null },
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .fillMaxHeight(),
                 contentScale = ContentScale.Fit
             )
         } else {

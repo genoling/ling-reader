@@ -4,6 +4,7 @@ import com.lreader.model.Book
 import com.lreader.model.BookFormat
 import com.lreader.model.Chapter
 import com.lreader.model.ChapterImage
+import com.lreader.model.TocEntry
 import org.json.JSONObject
 import java.io.File
 import java.util.zip.ZipFile
@@ -15,6 +16,31 @@ object BookParser {
 
     /** 正文里的插图占位符（U+FFFC OBJECT REPLACEMENT CHARACTER） */
     const val IMG_MARK = "\uFFFC"
+
+    /**
+     * 块类型标记（控制字符，正文里不可能出现）。
+     *
+     * EPUB 的 `<h1>/<h2>/<h3>` 是排版层级，拍平成纯文本后就丢了；带上标记后
+     * 阅读页能按层级渲染不同字号（标题大、正文小），与纸质/官方阅读器的观感一致。
+     */
+    const val MARK_TITLE: Char = '\u0001'    // h1
+    const val MARK_SUBTITLE: Char = '\u0002' // h2
+    const val MARK_SECTION: Char = '\u0003'  // h3
+    const val MARK_MINOR: Char = '\u0004'    // h4~h6
+    const val MARK_QUOTE: Char = '\u0005'    // blockquote
+
+    /**
+     * 内部超链接（EPUB 的目录页 / 栏目页大量使用）。
+     *
+     * 编码为 `MARK_LINK 目标路径 MARK_LINK_TEXT 链接文字 MARK_LINK_END`，
+     * 目标路径是 zip 内路径（已去 `#anchor`），阅读页据此跳到对应章节。
+     */
+    const val MARK_LINK: Char = '\u0006'
+    const val MARK_LINK_TEXT: Char = '\u0007'
+    const val MARK_LINK_END: Char = '\u0008'
+
+    /** 列表项前缀（`<li>`）：目录页就是一堆列表项，之前会被挤成一行 */
+    const val BULLET = "• "
 
     /** OPF manifest 里的 `<item …>` 标签 */
     private val ITEM_REGEX = Regex("""<item\b[^>]*>""")
@@ -147,6 +173,8 @@ object BookParser {
                 val spine = parseSpine(opfContent)
                 val opfDir = opfPath.substringBeforeLast('/', "")
 
+                // 目录：标题 + 层级（href → 文件名，去 fragment），用于章节命名与目录面板
+                val tocNodes = parseToc(zip, opfContent, opfDir)
                 val imageDir = imageDirFor(file)
                 var index = 0
                 for (idref in spine) {
@@ -159,22 +187,52 @@ object BookParser {
                     // 插图：按出现顺序提取到本地，正文里用占位符占位（下标一一对应）
                     val images = ArrayList<ChapterImage>()
                     val chapterDir = entryPath.substringBeforeLast('/', "")
-                    val text = htmlToText(html) { src, alt ->
-                        val imgEntry = resolveRelative(chapterDir, src)
-                        images.add(
-                            ChapterImage(
-                                path = extractImage(zip, imgEntry, imageDir).orEmpty(),
-                                alt = alt
+                    val text = htmlToText(
+                        html,
+                        onImage = { src, alt ->
+                            val imgEntry = resolveRelative(chapterDir, src)
+                            images.add(
+                                ChapterImage(
+                                    path = extractImage(zip, imgEntry, imageDir).orEmpty(),
+                                    alt = alt
+                                )
                             )
-                        )
-                    }
+                        },
+                        // 内部链接（目录页 / 栏目页）→ 记下目标文件，阅读页可点击跳章
+                        onLink = { link ->
+                            when {
+                                link.startsWith("http", true) ||
+                                    link.startsWith("mailto:", true) -> null
+
+                                else -> {
+                                    val clean = link.substringBefore('#')
+                                    if (clean.isBlank()) entryPath
+                                    else resolveRelative(chapterDir, clean)
+                                }
+                            }
+                        }
+                    )
                     if (text.isBlank()) continue
                     // 章节内没有标题时，用「书名 · 第 N 章」兜底
                     val fallback = titleMeta?.takeIf { it.isNotBlank() }
                         ?.let { "$it · 第 ${index + 1} 章" }
                         ?: "第 ${index + 1} 章"
-                    val title = extractTitle(html).ifBlank { fallback }
-                    chapters.add(Chapter(index, title, text, images))
+                    // 同一文件可能同时被栏目与文章两个目录项引用，取最深的（= 具体文章名）
+                    val toc = tocNodes.filter { it.path == entryPath }.maxByOrNull { it.level }
+                    // 标题优先级：目录标题（最完整）→ html `<title>` →「书名 · 第 N 章」
+                    val title = toc?.title?.takeIf { it.isNotBlank() }
+                        ?: extractTitle(html).ifBlank { fallback }
+                    chapters.add(
+                        Chapter(
+                            index = index,
+                            title = title,
+                            content = text,
+                            images = images,
+                            sourcePath = entryPath,
+                            tocTitle = toc?.title,
+                            tocLevel = toc?.level ?: 0
+                        )
+                    )
                     index++
                 }
             }
@@ -253,6 +311,148 @@ object BookParser {
     } catch (e: Exception) {
         path
     }
+
+    /**
+     * 解析 EPUB 目录：`href`（去 fragment、相对 zip 根）→ (标题, 层级)。
+     *
+     * 依次尝试：EPUB2 的 `toc.ncx`（`<navPoint>` 嵌套 = 层级）→ EPUB3 的 `nav.xhtml`
+     * （`<ol>` 嵌套 = 层级）。取不到就返回空列表。
+     *
+     * 同一章节文件常被**父子两个目录项同时引用**（父 = 栏目、子 = 具体文章），
+     * 因此这里保留全部节点（含层级），由调用方选最深的那条给章节命名。
+     */
+    private fun parseToc(
+        zip: ZipFile,
+        opf: String,
+        opfDir: String
+    ): List<TocNode> {
+        val out = ArrayList<TocNode>()
+        val seen = HashSet<String>()
+
+        // ---- EPUB2：toc.ncx ----
+        var ncxHref: String? = null
+        for (m in ITEM_REGEX.findAll(opf)) {
+            if ((attr(m.value, "media-type") ?: "").contains("dtbncx", ignoreCase = true)) {
+                ncxHref = attr(m.value, "href")
+                break
+            }
+        }
+        val ncxEntry = ncxHref?.let { zip.getEntry(joinPath(opfDir, it)) }
+            ?: zip.getEntry(joinPath(opfDir, "toc.ncx"))
+        if (ncxEntry != null) {
+            val ncx = readEntry(zip, ncxEntry).orEmpty()
+            val ncxDir = ncxEntry.name.substringBeforeLast('/', "")
+            var depth = 0
+            var pending: String? = null
+            TOC_TOKEN_REGEX.findAll(ncx).forEach { tk ->
+                val raw = tk.value
+                when {
+                    raw.startsWith("</") -> depth = (depth - 1).coerceAtLeast(0)
+                    raw.startsWith("<navPoint", ignoreCase = true) -> depth++
+                    tk.groupValues[1].isNotBlank() -> pending = tk.groupValues[1]
+                    tk.groupValues[2].isNotBlank() -> {
+                        val title = pending
+                        // href 可能带锚点（`xxx.html#politics`），配章节时必须去掉
+                        val path = resolveRelative(ncxDir, tk.groupValues[2].substringBefore('#'))
+                        val level = (depth - 1).coerceAtLeast(0)
+                        if (!title.isNullOrBlank() && seen.add("$path|$level")) {
+                            out.add(TocNode(title, path, level))
+                        }
+                        pending = null
+                    }
+                }
+            }
+        }
+
+        // ---- EPUB3：nav.xhtml（ncx 没解析出东西时才用）----
+        if (out.isEmpty()) {
+            val navHref = ITEM_REGEX.findAll(opf)
+                .firstOrNull { (attr(it.value, "properties") ?: "").contains("nav", ignoreCase = true) }
+                ?.let { attr(it.value, "href") }
+            val navEntry = navHref?.let { zip.getEntry(joinPath(opfDir, it)) }
+            if (navEntry != null) {
+                val nav = readEntry(zip, navEntry).orEmpty()
+                val navDir = navEntry.name.substringBeforeLast('/', "")
+                var depth = 0
+                NAV_TOKEN_REGEX.findAll(nav).forEach { tk ->
+                    val raw = tk.value
+                    when {
+                        raw.startsWith("</") -> depth = (depth - 1).coerceAtLeast(0)
+                        raw.startsWith("<ol", true) || raw.startsWith("<ul", true) -> depth++
+                        raw.startsWith("<a", true) -> {
+                            val href = attr(raw, "href") ?: return@forEach
+                            val title = stripTags(raw.substringAfter('>'))
+                            val path = resolveRelative(navDir, href.substringBefore('#'))
+                            val level = (depth - 1).coerceAtLeast(0)
+                            if (title.isNotBlank() && seen.add("$path|$level")) {
+                                out.add(TocNode(title, path, level))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return out
+    }
+
+    /** 目录节点：章节文件路径（zip 内、已去锚点）+ 标题 + 层级（0 = 顶层栏目） */
+    data class TocNode(val title: String, val path: String, val level: Int)
+
+    /**
+     * 目录节点 → 可直接跳转的 [TocEntry]（供阅读页目录面板使用）。
+     *
+     * 用 [Chapter.sourcePath] 建立「文件 → 章节号」映射，与 [loadEpub] 的过滤规则天然一致；
+     * txt / fb2 没有路径，返回空表，由 UI 回退成章节列表。
+     */
+    fun loadToc(book: Book, chapters: List<Chapter>): List<TocEntry> {
+        val pathToIndex = chapters.mapNotNull { c -> c.sourcePath?.let { it to c.index } }.toMap()
+        if (pathToIndex.isEmpty()) return emptyList()
+        var zip: ZipFile? = null
+        return try {
+            val z = ZipFile(File(book.filePath))
+            zip = z
+            val opfPath = findOpfPath(z).orEmpty()
+            if (opfPath.isEmpty()) {
+                emptyList()
+            } else {
+                val opf = z.getInputStream(z.getEntry(opfPath))
+                    .use { it.readBytes().toString(Charsets.UTF_8) }
+                parseToc(z, opf, opfPath.substringBeforeLast('/', ""))
+                    .mapNotNull { n -> pathToIndex[n.path]?.let { TocEntry(n.title, it, n.level) } }
+            }
+        } catch (e: Exception) {
+            emptyList()
+        } finally {
+            runCatching { zip?.close() }
+        }
+    }
+
+    private fun readEntry(zip: ZipFile, entry: java.util.zip.ZipEntry): String? = try {
+        zip.getInputStream(entry).use { it.readBytes().toString(Charsets.UTF_8) }
+    } catch (e: Exception) {
+        null
+    }
+
+    private fun stripTags(s: String): String = s.replace(Regex("<[^>]+>"), "").trim()
+
+    /** `<a href="…">文字</a>`：内部链接（目录页 / 栏目页） */
+    private val ANCHOR_REGEX = Regex(
+        """<a\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>(.*?)</a>""",
+        setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
+    )
+
+    /** ncx 的解析令牌：`<text>` 给标题、`<content src>` 给目标，`navPoint` 开合算层级 */
+    private val TOC_TOKEN_REGEX = Regex(
+        """<navPoint\b|</navPoint>|<text>\s*(.*?)\s*</text>|<content[^>]*\bsrc\s*=\s*"([^"]+)"""",
+        setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
+    )
+
+    /** nav.xhtml 的解析令牌：`<ol>/<ul>` 开合算层级，`<a href>文本` 给条目 */
+    private val NAV_TOKEN_REGEX = Regex(
+        """<(?:ol|ul)\b|</(?:ol|ul)>|<a\b[^>]*>[^<]*""",
+        RegexOption.IGNORE_CASE
+    )
 
     private fun findOpfPath(zip: ZipFile): String? {
         val container = zip.getEntry("META-INF/container.xml") ?: return null
@@ -403,9 +603,16 @@ object BookParser {
      * @param onImage 非空时**保留插图**：把 `<img src>` / `<image xlink:href>` 换成 [IMG_MARK] 占位符，
      *   并按出现顺序回调 (原始相对路径, alt)，由调用方提取图片；为空则插图被直接丢弃（旧行为）。
      */
-    fun htmlToText(html: String, onImage: ((String, String) -> Unit)? = null): String {
+    fun htmlToText(
+        html: String,
+        onImage: ((String, String) -> Unit)? = null,
+        /** 内部链接：返回该 href 在 zip 内的路径（外部链接 / 无法解析返回 null） */
+        onLink: ((String) -> String?)? = null
+    ): String {
         var s = html
         s = s.replace(Regex("(?is)<(script|style)[^>]*>.*?</\\1>"), "")
+        // `<head>` 里的 `<title>` 会被当正文提取（封面章于是只剩一个单词 "Cover"、广告页首行是文件名）
+        s = s.replace(Regex("(?is)<head\\b[^>]*>.*?</head>"), "")
         if (onImage != null) {
             s = IMG_TAG_REGEX.replace(s) { m ->
                 val alt = ALT_REGEX.find(m.value)?.groupValues?.get(1).orEmpty()
@@ -413,10 +620,32 @@ object BookParser {
                 "\n$IMG_MARK\n"
             }
         }
+        // 列表：每项独占一行 + 项目符号（EPUB 目录页/栏目页靠它排版）
+        s = s.replace(Regex("(?i)<li\\b[^>]*>"), "\n$BULLET")
+        s = s.replace(Regex("(?i)</li>"), "\n")
+        s = s.replace(Regex("(?i)</?(?:ul|ol)\\b[^>]*>"), "\n")
+        if (onLink != null) {
+            s = ANCHOR_REGEX.replace(s) { m ->
+                val label = m.groupValues[2].replace(Regex("(?s)<[^>]+>"), "").trim()
+                val target = onLink(m.groupValues[1])
+                if (target.isNullOrBlank() || label.isEmpty()) {
+                    label
+                } else {
+                    "$MARK_LINK$target$MARK_LINK_TEXT$label$MARK_LINK_END"
+                }
+            }
+        }
         s = s.replace(Regex("(?i)<br\\s*/?>"), "\n")
         s = s.replace(Regex("(?i)</p>"), "\n\n")
         s = s.replace(Regex("(?i)</div>"), "\n")
+        // 标题层级：起始标签前插入块标记，供阅读页分级排版（标记会被 UI 解析后去掉）
+        s = s.replace(Regex("(?i)<h1\\b[^>]*>"), "\n$MARK_TITLE")
+        s = s.replace(Regex("(?i)<h2\\b[^>]*>"), "\n$MARK_SUBTITLE")
+        s = s.replace(Regex("(?i)<h3\\b[^>]*>"), "\n$MARK_SECTION")
+        s = s.replace(Regex("(?i)<h[456]\\b[^>]*>"), "\n$MARK_MINOR")
+        s = s.replace(Regex("(?i)<blockquote\\b[^>]*>"), "\n$MARK_QUOTE")
         s = s.replace(Regex("(?i)</h[1-6]>"), "\n\n")
+        s = s.replace(Regex("(?i)</blockquote>"), "\n\n")
         s = s.replace(Regex("(?i)<title>(.*?)</title>"), "\n\n$1\n\n")
         s = s.replace(Regex("(?s)<[^>]+>"), "")
         s = s.replace(ATTR_LEFTOVER_REGEX, "")
