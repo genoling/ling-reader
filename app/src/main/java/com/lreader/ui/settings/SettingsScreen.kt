@@ -11,6 +11,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -48,6 +50,46 @@ import kotlinx.coroutines.withContext
 /** 管理员入口密码（需求指定） */
 private const val ADMIN_PASSWORD = "8848"
 
+/**
+ * 可折叠的设置分组标题行：左侧标题 + 当前值摘要，右侧展开箭头。
+ *
+ * 设置项很多，全部平铺会让页面冗长；折起来后一屏就能看全所有分组，
+ * 想改哪项再展开哪项。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun GroupHeader(
+    title: String,
+    summary: String,
+    expanded: Boolean,
+    onToggle: () -> Unit
+) {
+    Card(onClick = onToggle, modifier = Modifier.fillMaxWidth()) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(title, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                if (summary.isNotBlank()) {
+                    Text(
+                        summary,
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            Icon(
+                imageVector = if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                contentDescription = if (expanded) "收起" else "展开",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(onOpenAdmin: () -> Unit = {}) {
@@ -79,6 +121,16 @@ fun SettingsScreen(onOpenAdmin: () -> Unit = {}) {
     var skipBasicWords by remember { mutableStateOf(settings.skipBasicWords) }
     var themePreset by remember { mutableStateOf(settings.themePreset) }
     var engineId by remember { mutableStateOf(TranslationEngines.preferredEngine) }
+
+    /**
+     * 已展开的分组。设置项太多，全部摊开页面过长 ——
+     * 默认只展开最常用的「阅读显示」，其余折起来（标题行右侧显示当前值，点一下展开）。
+     */
+    var expandedGroups by remember { mutableStateOf(setOf("display")) }
+
+    fun toggleGroup(key: String) {
+        expandedGroups = if (key in expandedGroups) expandedGroups - key else expandedGroups + key
+    }
 
     // 进程级单例，见 SpeechManager.get
     val speech = SpeechManager.get(context)
@@ -181,7 +233,13 @@ fun SettingsScreen(onOpenAdmin: () -> Unit = {}) {
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             // ---------- 界面配色 ----------
-            SectionTitle("界面配色")
+            GroupHeader(
+                title = "界面配色",
+                summary = ThemePreset.values().getOrElse(themePreset) { ThemePreset.values()[0] }.label,
+                expanded = "theme" in expandedGroups,
+                onToggle = { toggleGroup("theme") }
+            )
+            if ("theme" in expandedGroups) {
             Card {
                 Column(Modifier.padding(14.dp)) {
                     Text(
@@ -214,12 +272,27 @@ fun SettingsScreen(onOpenAdmin: () -> Unit = {}) {
                 }
             }
 
+            }
+
             // ---------- 云同步（生词本） ----------
-            SectionTitle("云同步")
-            SyncSection(settings)
+            GroupHeader(
+                title = "云同步",
+                summary = "生词本 + 阅读进度 · 加密",
+                expanded = "sync" in expandedGroups,
+                onToggle = { toggleGroup("sync") }
+            )
+            if ("sync" in expandedGroups) {
+                SyncSection(settings)
+            }
 
             // ---------- 本地词典（按需下载） ----------
-            SectionTitle("本地词典")
+            GroupHeader(
+                title = "本地词典",
+                summary = if (dictCount > 0) "主词典 $dictCount 词条" else "未下载（按需下载，离线查词）",
+                expanded = "dict" in expandedGroups,
+                onToggle = { toggleGroup("dict") }
+            )
+            if ("dict" in expandedGroups) {
             Card {
                 Column(Modifier.padding(14.dp)) {
                     Text(
@@ -317,8 +390,16 @@ fun SettingsScreen(onOpenAdmin: () -> Unit = {}) {
                 }
             }
 
+            }
+
             // ---------- 发音 ----------
-            SectionTitle("发音")
+            GroupHeader(
+                title = "发音",
+                summary = (if (accent == "UK") "英音" else "美音") + " · 语速 " + speechRate,
+                expanded = "speech" in expandedGroups,
+                onToggle = { toggleGroup("speech") }
+            )
+            if ("speech" in expandedGroups) {
             Card {
                 Column(Modifier.padding(14.dp)) {
                     SwitchRow("点击单词自动发音", autoSpeak) {
@@ -480,6 +561,8 @@ fun SettingsScreen(onOpenAdmin: () -> Unit = {}) {
                 }
             }
 
+            }
+
             // ---------- 阅读显示 ----------
             SectionTitle("阅读显示")
             Card {
@@ -508,7 +591,13 @@ fun SettingsScreen(onOpenAdmin: () -> Unit = {}) {
             }
 
             // ---------- 分级词汇高亮 ----------
-            SectionTitle("分级词汇高亮")
+            GroupHeader(
+                title = "分级词汇高亮",
+                summary = enabledLevels.size.toString() + " 个级别已开启",
+                expanded = "levels" in expandedGroups,
+                onToggle = { toggleGroup("levels") }
+            )
+            if ("levels" in expandedGroups) {
             Card {
                 Column(Modifier.padding(14.dp)) {
                     SwitchRow("高亮生词本中的词（红色）", highlightVocab) {
@@ -571,8 +660,16 @@ fun SettingsScreen(onOpenAdmin: () -> Unit = {}) {
                 }
             }
 
+            }
+
             // ---------- 翻译引擎 ----------
-            SectionTitle("翻译引擎")
+            GroupHeader(
+                title = "翻译引擎",
+                summary = "在线翻译（默认免 Key）",
+                expanded = "translate" in expandedGroups,
+                onToggle = { toggleGroup("translate") }
+            )
+            if ("translate" in expandedGroups) {
             Card {
                 Column(Modifier.padding(14.dp)) {
                     Text(
@@ -649,6 +746,8 @@ fun SettingsScreen(onOpenAdmin: () -> Unit = {}) {
                         }
                     }
                 }
+            }
+
             }
 
             // ---------- 关于 / 版本更新 ----------
@@ -1055,6 +1154,8 @@ private fun SyncSection(settings: SettingsStore) {
                         if (SyncCode.decode(codeDraft) == null) {
                             message = "同步码格式无效，请检查是否完整"
                         } else {
+                            // 配好同步码就算开启了自动同步（用户默认期望：多设备之间自动保持一致）
+                            settings.syncAuto = true
                             runSync()
                         }
                     }
@@ -1091,6 +1192,7 @@ private fun SyncSection(settings: SettingsStore) {
             onDismiss = { showGenerator = false },
             onCreated = { code ->
                 settings.syncCode = code
+                settings.syncAuto = true   // 生成同步码即视为开启自动同步
                 codeDraft = code
                 showGenerator = false
                 message = "已生成同步码：复制到其它设备粘贴即可"
