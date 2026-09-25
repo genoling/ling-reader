@@ -45,6 +45,8 @@ fun DictBottomSheet(
     inVocab: Boolean,
     onSpeak: () -> Unit,
     onAddVocab: () -> Unit,
+    /** 已在生词本时再点一次 = 取消收藏 */
+    onRemoveVocab: () -> Unit,
     onTranslateSentence: () -> Unit,
     translating: Boolean,
     translation: TranslationResult?,
@@ -92,10 +94,10 @@ fun DictBottomSheet(
                     Icon(Icons.Filled.VolumeUp, contentDescription = "发音")
                 }
                 // 加入生词本
-                IconButton(onClick = onAddVocab, enabled = !inVocab) {
+                IconButton(onClick = { if (inVocab) onRemoveVocab() else onAddVocab() }) {
                     Icon(
                         if (inVocab) Icons.Filled.Check else Icons.Filled.Add,
-                        contentDescription = "加入生词本",
+                        contentDescription = if (inVocab) "取消加入生词本" else "加入生词本",
                         tint = if (inVocab) MaterialTheme.colorScheme.primary
                         else MaterialTheme.colorScheme.onSurface
                     )

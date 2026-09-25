@@ -27,8 +27,10 @@ import com.lreader.data.VocabRepository
 import com.lreader.dict.DictDatabase
 import com.lreader.export.VocabExporter
 import com.lreader.export.VocabImporter
+import com.lreader.model.DictEntry
 import com.lreader.model.VocabWord
 import com.lreader.speech.SpeechManager
+import com.lreader.translate.TranslationEngines
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -58,6 +60,14 @@ fun VocabScreen(
     var query by remember { mutableStateOf("") }
     var dueCount by remember { mutableStateOf(0) }
     var showMenu by remember { mutableStateOf(false) }
+
+    // 单词详情弹层（点击某一行打开；打开时自动朗读一次）
+    var detailWord by remember { mutableStateOf<VocabWord?>(null) }
+    var detailEntry by remember { mutableStateOf<DictEntry?>(null) }
+    var detailLoading by remember { mutableStateOf(false) }
+    /** 原句译文（详情弹层里直接显示，省掉一次手动翻译） */
+    var detailTranslation by remember { mutableStateOf<String?>(null) }
+    var detailTranslating by remember { mutableStateOf(false) }
 
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -117,6 +127,36 @@ fun VocabScreen(
                 }
             }
             snackbar.showSnackbar(if (path != null) "已导出：$path" else "导出失败")
+        }
+    }
+
+    /**
+     * 打开单词详情：**先出声**（首次进入即朗读一次），再异步取词典释义。
+     * 词典 HTML 交给 [WordDetailSheet] 里的 WebView 渲染，长词条也能滚到底。
+     */
+    fun openDetail(w: VocabWord) {
+        detailWord = w
+        detailEntry = null
+        detailLoading = true
+        detailTranslation = null
+        detailTranslating = false
+        speech.accent = if (settings.accent == "UK") SpeechManager.Accent.UK else SpeechManager.Accent.US
+        speech.rate = settings.speechRate
+        speech.speak(w.word)
+        scope.launch {
+            detailEntry = withContext(Dispatchers.IO) {
+                if (dict.ensureReady()) dict.lookup(w.word) else null
+            }
+            detailLoading = false
+            // 顺手把原句译文取回来（失败就留空，弹层会提示）
+            if (w.sentence.isNotBlank()) {
+                detailTranslating = true
+                val r = runCatching {
+                    TranslationEngines.translate(w.sentence, "en", settings.targetLang)
+                }.getOrNull()
+                detailTranslation = r?.takeIf { it.success }?.translatedText
+                detailTranslating = false
+            }
         }
     }
 
@@ -260,7 +300,7 @@ fun VocabScreen(
                     items(filtered, key = { it.id }) { w ->
                         VocabRow(
                             w = w,
-                            onSpeak = { speech.speak(w.word) },
+                            onOpen = { openDetail(w) },
                             onDelete = {
                                 repo.remove(w.id)
                                 refresh()
@@ -271,17 +311,33 @@ fun VocabScreen(
             }
         }
     }
+
+    // 单词详情弹层
+    detailWord?.let { w ->
+        WordDetailSheet(
+            word = w.word,
+            phonetic = w.phonetic,
+            level = w.level,
+            sentence = w.sentence,
+            translation = detailTranslation,
+            translating = detailTranslating,
+            entry = detailEntry,
+            loading = detailLoading,
+            onSpeak = { speech.speak(w.word) },
+            onDismiss = { detailWord = null }
+        )
+    }
 }
 
 /**
- * 单条生词：单词 + 词性 + 音标 + 含义。整行可点击朗读。
+ * 单条生词：单词 + 词性 + 音标 + 含义。整行点击进入详情（进入时自动朗读一次）。
  */
 @Composable
-private fun VocabRow(w: VocabWord, onSpeak: () -> Unit, onDelete: () -> Unit) {
+private fun VocabRow(w: VocabWord, onOpen: () -> Unit, onDelete: () -> Unit) {
     val pos = remember(w.meaning) { WordAnalysis.partOfSpeech(w.meaning) }
     val meaning = remember(w.word, w.meaning) { WordAnalysis.cleanMeaning(w.word, w.meaning) }
 
-    Card(Modifier.fillMaxWidth().clickable { onSpeak() }) {
+    Card(Modifier.fillMaxWidth().clickable { onOpen() }) {
         Row(
             Modifier.padding(start = 14.dp, end = 4.dp, top = 10.dp, bottom = 10.dp),
             verticalAlignment = Alignment.CenterVertically

@@ -3,6 +3,40 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与 [语义化版本](https://semver.org/lang/zh-CN/)。
 版本号对应 `app/build.gradle.kts` 中的 `versionName` / `versionCode`。
 
+## [1.3.0] - 2026-09-25
+
+**书架封面网格与拖动排序、外刊杂志下载、EPUB 插图、生词详情译文、每日复习刷新、设置页版本更新。**
+
+**新增**
+- 书架改为**封面网格**：自动提取 EPUB 封面（EPUB2 `meta cover` / EPUB3 `properties` / 文件名兜底），列数自适应，支持书名搜索。
+- 书架**长按拖动排序**，松手即写入 `bookshelf.json`；长按原地抬手弹出「打开 / 删除」菜单。
+- **外刊杂志**：浏览 `hehonghui/awesome-english-ebooks` 的 216 期外刊（The Economist / The New Yorker /
+  The Atlantic / Wired），下载后自动入书架并提取封面。目录走 jsDelivr data API → GitHub API → 本地缓存，
+  下载走 jsDelivr CDN → raw → ghproxy 三级重试。
+- **EPUB 插图**：解析 `<img src>` / `<image xlink:href>`，按正文位置插入**插图页**（整页等比显示）；
+  图片缓存在 `books/.images/<书名>/`，删书时一并清理。
+- **生词详情**：点生词进入详情（完整释义 + 原句）并**自动朗读一次**；原句下方**直接显示译文**（进入时自动翻译）。
+- 查词弹层「加入生词本」改为**开关**：已收藏时再点一次即取消。
+- 设置页底部新增**关于**：显示当前版本号，并支持**一键检查更新 → 下载并安装**
+  （GitHub Release API + ghproxy 镜像兜底，下载后交系统安装器，用户确认后安装）。
+- 复习页改为**每日刷新**：只有「当天还没背过」的词进入队列，背过即消失，次日 0 点自动全部重现；
+  背单词**默认乱序**（开关不再暴露在界面上）。
+
+**修复**
+- EPUB 正文残留 `class="te_head_image"/>` 等属性碎片：img 正则未匹配结尾 `>`，导致标签被吃掉一半；
+  现已匹配完整标签并兼容单引号，另加「整行只剩属性碎片时删除该行」的兜底。
+- 复习队列为空时不再退回「全部生词」（会破坏「每日刷新」的语义）。
+
+**数据**
+- `vocab.db` 新增 `last_review_day` 列（`DB_VERSION` 2 → 3，仍是非破坏性 `ALTER TABLE` 补列）。
+
+**校验**
+- `assembleDebug` 零警告；`versionCode` 12 → **13**，`versionName` `1.2.0` → **`1.3.0`**。
+- 设备自测（MuMu / Android 12）：封面提取、拖动排序（重启后保持）、外刊下载入书架、插图页显示、
+  生词详情译文、生词加入/取消、每日队列递减（10 → 9）、设置页版本号与「已是最新版本」。
+
+---
+
 ## [1.2.0] - 2026-09-25
 
 **新增：ECDICT 补充词典（77 万词条）、离线语音引擎一键下载安装、发音引擎可切换；修复查词弹层长词条被截断、派生词查不到。**

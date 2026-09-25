@@ -61,6 +61,8 @@ fun ReviewScreen(
     val dict = remember { DictDatabase(context) }
 
     var pending by remember { mutableStateOf<List<VocabWord>>(emptyList()) }
+    /** 乱序背诵：默认开启（不再提供 UI 开关） */
+    val shuffle = settings.reviewShuffle
     var total by remember { mutableStateOf(0) }
     var mastered by remember { mutableStateOf(0) }
     var forgotTimes by remember { mutableStateOf(0) }
@@ -72,16 +74,15 @@ fun ReviewScreen(
 
     val scope = rememberCoroutineScope()
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(shuffle) {
         speech.accent = SpeechManager.Accent.US
         speech.rate = settings.speechRate
         speech.init()
 
         val list = withContext(Dispatchers.IO) {
-            val due = repo.dueToday()
-            val target = if (due.isEmpty()) repo.all() else due
             dict.ensureReady()
-            target
+            // 每天刷新：只取「今天还没背过」的词；全部背完就是空队列（不再退回全部词）
+            repo.todayPending(shuffle)
         }
         pending = list
         total = list.size
@@ -164,6 +165,18 @@ fun ReviewScreen(
                 current == null -> FinishedView(mastered, total, forgotTimes, onBack)
 
                 else -> Column(Modifier.fillMaxSize().padding(16.dp)) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "今日待背 ${pending.size}",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(Modifier.weight(1f))
+                    }
+                    Spacer(Modifier.height(6.dp))
                     ReviewCard(
                         word = current,
                         entry = dictEntry,

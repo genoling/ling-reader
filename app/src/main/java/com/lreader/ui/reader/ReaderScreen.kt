@@ -1,7 +1,10 @@
 package com.lreader.ui.reader
 
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -22,9 +25,11 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.SpanStyle
@@ -45,6 +50,7 @@ import com.lreader.dict.DictDatabase
 import com.lreader.dict.LevelDictionary
 import com.lreader.model.Book
 import com.lreader.model.Chapter
+import com.lreader.model.ChapterImage
 import com.lreader.model.DictEntry
 import com.lreader.model.TranslationResult
 import com.lreader.speech.SpeechManager
@@ -86,7 +92,7 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
     // ---- 阅读主题 / 翻页 / 下拉参数面板 / 详情 ----
     var themeIndex by remember { mutableStateOf(settings.readingTheme) }
     val theme = ReadingTheme.of(themeIndex)
-    var pages by remember { mutableStateOf<List<String>>(emptyList()) }
+    var pages by remember { mutableStateOf<List<ReaderPage>>(emptyList()) }
     var pageIndex by remember { mutableStateOf(0) }
     var showParams by remember { mutableStateOf(false) }
     var showDetail by remember { mutableStateOf(false) }
@@ -238,6 +244,7 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
                     // key 变化（换章 / 改字号行距）时重新分页
                     chapterKey = "$bookId#$chapterIndex#$fontSize#$lineHeight",
                     text = chapters[chapterIndex].content,
+                    images = chapters[chapterIndex].images,
                     theme = theme,
                     enabledLevels = enabledLevels,
                     levels = levels,
@@ -323,6 +330,13 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
             sourceBook = book?.title ?: "",
             inVocab = vocabWords.contains((dictEntry?.word ?: w).lowercase()),
             onSpeak = { speech.speak(dictEntry?.word ?: w) },
+            onRemoveVocab = {
+                val target = dictEntry?.word ?: w
+                vocabWords = vocabWords - target.lowercase()
+                scope.launch {
+                    withContext(Dispatchers.IO) { vocab.removeByWord(target) }
+                }
+            },
             onAddVocab = {
                 val e = dictEntry
                 scope.launch {
@@ -695,6 +709,15 @@ private fun paginate(text: String, layout: TextLayoutResult, linesPerPage: Int):
 }
 
 /**
+ * 阅读页的一页：正文页（走 [WordText]，带点词与分级高亮）或**插图页**。
+ * EPUB 的插图会作为独立一页，插在它原本所在的正文位置后面。
+ */
+private sealed interface ReaderPage {
+    data class Text(val text: String) : ReaderPage
+    data class Image(val image: ChapterImage) : ReaderPage
+}
+
+/**
  * 分页阅读器：左右滑动翻页、下拉调参、点击查词、长按整句翻译。
  *
  * 分页实现：先用一个透明 Text 在正文宽度下排版一次，拿到 [TextLayoutResult]，
@@ -706,6 +729,8 @@ private fun paginate(text: String, layout: TextLayoutResult, linesPerPage: Int):
 private fun PagedReader(
     chapterKey: String,
     text: String,
+    /** 本章插图，与 [text] 里的 `\uFFFC` 占位符按顺序对应 */
+    images: List<ChapterImage>,
     theme: ReadingTheme,
     enabledLevels: Set<String>,
     levels: LevelDictionary,
@@ -715,7 +740,7 @@ private fun PagedReader(
     skipBasic: Boolean,
     fontSize: Float,
     lineHeight: Float,
-    onPagesReady: (List<String>) -> Unit,
+    onPagesReady: (List<ReaderPage>) -> Unit,
     onPageChanged: (Int) -> Unit,
     onPullDown: () -> Unit,
     hasPrevChapter: Boolean,
@@ -726,29 +751,52 @@ private fun PagedReader(
     onLongPressSentence: (String) -> Unit
 ) {
     val density = LocalDensity.current
-    var pages by remember(chapterKey) { mutableStateOf<List<String>>(emptyList()) }
+    var pages by remember(chapterKey) { mutableStateOf<List<ReaderPage>>(emptyList()) }
+    // 含插图时按占位符切段、逐段测量（每段一个透明 Text）
+    var segLayouts by remember(chapterKey) { mutableStateOf<Map<Int, TextLayoutResult>>(emptyMap()) }
 
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val pageHeightPx = with(density) { (maxHeight - 26.dp).toPx() }
         val lineHeightPx = with(density) { lineHeight.sp.toPx() }
+        val perPage = maxOf(1, (pageHeightPx / lineHeightPx).toInt())
 
         // 分页结果同步给父级；放在 LaunchedEffect 里，避免在 layout 阶段写 state
         LaunchedEffect(pages) { if (pages.isNotEmpty()) onPagesReady(pages) }
 
+        // 没插图就是整章文本；有插图时按 IMG_MARK 切段（段数 = 图数 + 1）
+        val segments = remember(chapterKey, text, images) {
+            if (images.isEmpty()) listOf(text) else text.split(BookParser.IMG_MARK)
+        }
+
+        // 逐段测量完成后拼装页序列：段0 的页 → 图0 → 段1 的页 → 图1 → …
+        LaunchedEffect(segLayouts, segments, perPage) {
+            if (segLayouts.size < segments.size) return@LaunchedEffect
+            val built = ArrayList<ReaderPage>()
+            segments.forEachIndexed { i, seg ->
+                val lr = segLayouts[i] ?: return@forEachIndexed
+                paginate(seg, lr, perPage).forEach { built.add(ReaderPage.Text(it)) }
+                images.getOrNull(i)?.let { built.add(ReaderPage.Image(it)) }
+            }
+            if (built.isNotEmpty()) pages = built
+        }
+
         if (pages.isEmpty()) {
-            // 测量阶段：不可见地排版一次
-            Text(
-                text = text,
-                style = TextStyle(fontSize = fontSize.sp, lineHeight = lineHeight.sp),
-                modifier = Modifier
+            // 测量阶段：不可见地排版（纯文本排一次；含插图时逐段各排一次）
+            Column(
+                Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 18.dp, vertical = 12.dp)
-                    .alpha(0f),
-                onTextLayout = { lr ->
-                    val perPage = maxOf(1, (pageHeightPx / lineHeightPx).toInt())
-                    pages = paginate(text, lr, perPage)
+                    .alpha(0f)
+            ) {
+                segments.forEachIndexed { i, seg ->
+                    Text(
+                        text = seg,
+                        style = TextStyle(fontSize = fontSize.sp, lineHeight = lineHeight.sp),
+                        modifier = Modifier.fillMaxWidth(),
+                        onTextLayout = { lr -> segLayouts = segLayouts + (i to lr) }
+                    )
                 }
-            )
+            }
         } else {
             var idx by remember(chapterKey) { mutableStateOf(0) }
             LaunchedEffect(idx) {
@@ -788,24 +836,78 @@ private fun PagedReader(
                         )
                     }
             ) { i ->
-                WordText(
-                    text = pages[i.coerceIn(0, pages.size - 1)],
-                    enabledLevels = enabledLevels,
-                    levels = levels,
-                    levelsReady = levelsReady,
-                    vocabWords = vocabWords,
-                    highlightVocab = highlightVocab,
-                    skipBasic = skipBasic,
-                    fontSize = fontSize,
-                    lineHeight = lineHeight,
-                    theme = theme,
-                    onWordClick = onWordClick,
-                    onLongPressSentence = onLongPressSentence,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(horizontal = 18.dp, vertical = 12.dp)
-                )
+                when (val page = pages[i.coerceIn(0, pages.size - 1)]) {
+                    is ReaderPage.Text -> WordText(
+                        text = page.text,
+                        enabledLevels = enabledLevels,
+                        levels = levels,
+                        levelsReady = levelsReady,
+                        vocabWords = vocabWords,
+                        highlightVocab = highlightVocab,
+                        skipBasic = skipBasic,
+                        fontSize = fontSize,
+                        lineHeight = lineHeight,
+                        theme = theme,
+                        onWordClick = onWordClick,
+                        onLongPressSentence = onLongPressSentence,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 18.dp, vertical = 12.dp)
+                    )
+
+                    is ReaderPage.Image -> ImagePage(
+                        image = page.image,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 18.dp, vertical = 12.dp)
+                    )
+                }
             }
+        }
+    }
+}
+
+/**
+ * 插图页：整页居中等比显示一张 EPUB 插图。
+ *
+ * 大图统一降采样解码（RGB_565）以免 OOM；图片缺失时显示「［图片］+ alt」占位，翻页不受影响。
+ */
+@Composable
+private fun ImagePage(image: ChapterImage, modifier: Modifier = Modifier) {
+    val bitmap by produceState<Bitmap?>(initialValue = null, image.path) {
+        value = withContext(Dispatchers.IO) {
+            if (image.path.isBlank()) return@withContext null
+            runCatching {
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeFile(image.path, bounds)
+                var sample = 1
+                while (bounds.outWidth > 0 && bounds.outWidth / (sample * 2) >= 900) sample *= 2
+                BitmapFactory.decodeFile(
+                    image.path,
+                    BitmapFactory.Options().apply {
+                        inSampleSize = sample
+                        inPreferredConfig = Bitmap.Config.RGB_565
+                    }
+                )
+            }.getOrNull()
+        }
+    }
+
+    Box(modifier, contentAlignment = Alignment.Center) {
+        val bmp = bitmap
+        if (bmp != null) {
+            Image(
+                bitmap = bmp.asImageBitmap(),
+                contentDescription = image.alt.ifBlank { null },
+                modifier = Modifier.fillMaxWidth(),
+                contentScale = ContentScale.Fit
+            )
+        } else {
+            Text(
+                "［图片］" + image.alt.takeIf { it.isNotBlank() }?.let { " $it" }.orEmpty(),
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }

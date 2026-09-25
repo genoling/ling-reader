@@ -36,12 +36,27 @@ enum class BookFormat {
 }
 
 /**
+ * 章节里的一张插图（目前只有 EPUB 会用到）。
+ *
+ * 与 [Chapter.content] 中的 `\uFFFC` 占位符**按顺序一一对应**；
+ * 阅读页把它渲染成一页图片（见 `ReaderPage.Image`）。
+ */
+data class ChapterImage(
+    /** 已释放到本地的图片路径；提取失败时为空串（正文只显示「［图片］」占位） */
+    val path: String,
+    /** 原始 html 的 alt 文本 */
+    val alt: String = ""
+)
+
+/**
  * 一个章节
  */
 data class Chapter(
     val index: Int,
     val title: String,
-    val content: String
+    val content: String,
+    /** 插图列表，与 [content] 中的 `\uFFFC` 占位符按顺序对应（无图时为空） */
+    val images: List<ChapterImage> = emptyList()
 )
 
 /**

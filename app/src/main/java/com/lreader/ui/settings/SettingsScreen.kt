@@ -21,7 +21,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.lreader.data.ReleaseInfo
 import com.lreader.data.SettingsStore
+import com.lreader.data.UpdateRepository
 import com.lreader.data.VocabRepository
 import com.lreader.dict.DictCatalog
 import com.lreader.dict.DictDatabase
@@ -35,6 +37,7 @@ import com.lreader.translate.TranslationEngines
 import com.lreader.ui.theme.AppThemeState
 import com.lreader.ui.theme.ThemePreset
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -75,6 +78,52 @@ fun SettingsScreen() {
     var speechError by remember { mutableStateOf<String?>(null) }
     /** 设备上已安装的语音引擎；装了新引擎后点「刷新」重新读取 */
     var engineItems by remember { mutableStateOf(speech.engineItems()) }
+
+    // ---- 关于 / 版本更新 ----
+    val scope = rememberCoroutineScope()
+    val updater = remember { UpdateRepository(context) }
+    val versionName = remember { updater.currentVersionName() }
+    val versionCode = remember { updater.currentVersionCode() }
+    var checking by remember { mutableStateOf(false) }
+    var newRelease by remember { mutableStateOf<ReleaseInfo?>(null) }
+    var updateError by remember { mutableStateOf<String?>(null) }
+    var updateChecked by remember { mutableStateOf(false) }
+    var downloading by remember { mutableStateOf(false) }
+    var downloadProgress by remember { mutableStateOf(0f) }
+
+    fun checkUpdate() {
+        scope.launch {
+            checking = true
+            updateError = null
+            updater.check()
+                .onSuccess { info ->
+                    newRelease = info.takeIf { UpdateRepository.isNewer(it.version, versionName) }
+                    updateChecked = true
+                }
+                .onFailure {
+                    updateError = it.message ?: "检查更新失败"
+                    updateChecked = true
+                }
+            checking = false
+        }
+    }
+
+    fun downloadAndInstall() {
+        val info = newRelease ?: return
+        scope.launch {
+            downloading = true
+            downloadProgress = 0f
+            val file = updater.download(info) { downloadProgress = it }
+            downloading = false
+            if (file == null) {
+                updateError = "下载失败，请换网络后重试"
+            } else {
+                TtsInstaller.install(context, file).onFailure {
+                    updateError = "无法打开安装界面：${it.message ?: ""}"
+                }
+            }
+        }
+    }
 
     // 词典安装状态变化（下载完成 / 被删除）后重新统计词条数
     LaunchedEffect(dictVersion) {
@@ -586,6 +635,102 @@ fun SettingsScreen() {
                             KeyField("模型名（可选）", "openai_model")
                             Hint("可填 DeepSeek、通义等兼容 OpenAI 协议的平台")
                         }
+                    }
+                }
+            }
+
+            // ---------- 关于 / 版本更新 ----------
+            SectionTitle("关于")
+            Card {
+                Column(Modifier.padding(14.dp)) {
+                    Text("LingReader", fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        "当前版本 v$versionName（$versionCode）",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(8.dp))
+
+                    when {
+                        checking -> Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                            Text("正在检查更新…", fontSize = 12.sp)
+                        }
+
+                        downloading -> Column {
+                            Text("正在下载…", fontSize = 12.sp)
+                            Spacer(Modifier.height(6.dp))
+                            LinearProgressIndicator(
+                                progress = downloadProgress,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "${(downloadProgress * 100).toInt()}%",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        newRelease != null -> Column {
+                            Text(
+                                "发现新版本 ${newRelease!!.version}",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            val notes = newRelease!!.notes
+                            if (notes.isNotBlank()) {
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    notes,
+                                    fontSize = 11.sp,
+                                    lineHeight = 16.sp,
+                                    maxLines = 6,
+                                    overflow = TextOverflow.Ellipsis,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Spacer(Modifier.height(6.dp))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Button(onClick = { downloadAndInstall() }) {
+                                    Text("下载并安装", fontSize = 13.sp)
+                                }
+                                Spacer(Modifier.width(8.dp))
+                                TextButton(onClick = { checkUpdate() }) {
+                                    Text("重新检查", fontSize = 12.sp)
+                                }
+                            }
+                        }
+
+                        updateChecked -> Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                "已是最新版本",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(Modifier.weight(1f))
+                            TextButton(onClick = { checkUpdate() }) {
+                                Text("重新检查", fontSize = 12.sp)
+                            }
+                        }
+
+                        else -> TextButton(
+                            onClick = { checkUpdate() },
+                            contentPadding = PaddingValues(0.dp)
+                        ) { Text("检查更新", fontSize = 13.sp) }
+                    }
+
+                    updateError?.let {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            it,
+                            fontSize = 11.sp,
+                            lineHeight = 16.sp,
+                            color = MaterialTheme.colorScheme.error
+                        )
                     }
                 }
             }
