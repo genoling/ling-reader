@@ -121,6 +121,9 @@ $adb = "E:\Android_Sdk\platform-tools\adb.exe"
 | 首启白屏 10~30 秒 | 正常：`DictDatabase.ensureReady()` 正在释放 115MB 词典到 `filesDir`；`& $adb shell run-as com.ling-reader ls -l files/` 应见 `dict_en_zh.db` / `levels.db` / `bookshelf.json` / `settings.json` / `vocab.db` |
 | 点词无释义 | 断点 `DictDatabase.lookup()`；看 logcat 有无 SQLite 异常；确认 APK 内 db 未压缩（`noCompress += listOf("db","min.db")`） |
 | 点词不发音 | 先看**设置 → 发音 → 发音自检**：显示「已切换在线发音」= 设备没装系统语音引擎（模拟器常见），属预期兜底；显示系统引擎却仍无声 → logcat 搜 `SpeechManager`，再查媒体音量与系统 TTS 设置 |
+| 音色不好听 / 手机平板发音不一致 | **设置 → 发音 → 语音引擎**里两台设备选同一个引擎即可统一；列表里没有目标引擎时，先在系统里装好（ColorOS：设置 → 无障碍 → 文字转语音设置）再回来点「刷新」。临时方案：打开「始终使用在线发音」 |
+| 引擎下载后没出现在「语音引擎」列表 | 要先点「安装」并在系统弹窗确认（Android 不允许静默安装）；装完点「刷新」重新枚举。arm64 包只能装在 arm64 设备上 |
+| 补充词典下载后查不到 | 当前版本会自动热探测（`supStamp` 指纹），无需重启；仍无效时看 `filesDir/ecdict.db` 是否完整（133,664,768 B）与 logcat 有无 SQLite 异常 |
 | 翻译失败 | `TranslationEngines.translate()` 只走**首个已配置**引擎；未填 Key 返回 `success=false`；logcat 搜 `okhttp` |
 | EPUB 导入失败 | 走 SAF 选择器；断点 `BookParser.loadChapters()`（仓库根目录有 `TheEconomist.2026.09.19.epub` 可测） |
 | 崩溃 | `& $adb logcat -b crash` 或 AS Logcat 过滤 `AndroidRuntime:E *:S` |
@@ -149,12 +152,22 @@ App 默认从本仓库 GitHub Release 按需下载词典，**附件名与 tag �
 ```powershell
 cd e:\ai_project\ling_reader\ling-reader
 
-# 首次发布（tag = dict-v1，附件名 = dict_en_zh.min.db）
+# 1) 主词典（tag = dict-v1，附件名 = dict_en_zh.min.db，120,348,672 B）
 gh release create dict-v1 dict-assets/dict_en_zh.min.db -t "词典资源 v1" -n "21世纪大英汉词典（供 App 按需下载）"
-
 # 之后替换附件（保留 tag，App 端地址不变）
 gh release upload dict-v1 dict-assets/dict_en_zh.min.db --clobber
+
+# 2) ECDICT 补充词典（tag = dict-v2，附件名 = ecdict.db，133,664,768 B）
+#    源数据：skywind3000/ECDICT 的 ecdict.csv（62.9MB，MIT）
+#    转换脚本：python .codebuddy/build_ecdict.py（生成 dict + lemma 两张表）
+gh release create dict-v2 .codebuddy/build/ecdict.db -t "词典资源 v2：ECDICT 补充词典" -n "ECDICT 英汉词典，770,611 词条"
+gh release upload dict-v2 .codebuddy/build/ecdict.db --clobber
+
+# 3) 离线语音引擎：40~330MB 的 APK 不放进本仓库，直接引用官方 hf-mirror 地址（见 TtsCatalog）
 ```
+
+> 资源体积一旦变化，**必须同步 `DictCatalog`（词典）或 `TtsCatalog`（引擎）里的 `sizeBytes`**，
+> 否则 App 端下载后的大小校验会失败（`文件大小不符`）。
 
 - 下载地址 = `https://github.com/genoling/ling-reader/releases/download/dict-v1/dict_en_zh.min.db`
 - 换了词典文件后，**必须同步更新 `DictCatalog.MAIN.sizeBytes`**（字节数），否则 App 的大小校验会拒绝安装。

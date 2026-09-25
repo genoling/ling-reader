@@ -115,6 +115,32 @@ class SpeechManager private constructor(context: Context) {
 
     private var player: MediaPlayer? = null
 
+    /**
+     * 指定要使用的系统 TTS 引擎包名；null / 空串 = 跟随系统默认引擎。
+     *
+     * 手机与平板音色不同，正是因为各自装/默认了不同的引擎。赋值会**重新绑定**引擎，
+     * 由设置页「语音引擎」列表调用（见 [engineItems]）。
+     */
+    var enginePackage: String? = null
+        set(value) {
+            val v = value?.takeIf { it.isNotBlank() }
+            if (field == v) return
+            field = v
+            rebind()
+        }
+
+    /**
+     * true = 不依赖系统引擎，**始终走在线发音**（有道 dictvoice）。
+     * 适合设备没装引擎、或想让手机/平板音色完全一致的用户；代价是每次发音都要联网。
+     * 切换后会重新绑定（关掉时要把系统引擎重新建起来）。
+     */
+    var preferOnline: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value
+            rebind()
+        }
+
     var accent: Accent = Accent.US
         set(value) {
             field = value
@@ -139,56 +165,149 @@ class SpeechManager private constructor(context: Context) {
             notifyStatus()
             return
         }
+        if (preferOnline) {
+            // 用户选择「始终在线发音」：不建引擎，直接走在线通道
+            status = Status.READY
+            mode = Mode.ONLINE
+            notifyStatus()
+            flushPending()
+            return
+        }
         initializing = true
         status = Status.INITIALIZING
         mode = Mode.SYSTEM_PENDING
         notifyStatus()
 
-        tts = TextToSpeech(appContext) { st ->
+        val wanted = enginePackage
+        val listener = TextToSpeech.OnInitListener { st ->
             val engine = tts
-            if (st != TextToSpeech.SUCCESS || engine == null) {
+            when {
+                // 指定引擎不可用（被卸载 / 包名过期）：清掉选择并回退系统默认，重试一次
+                st != TextToSpeech.SUCCESS && wanted != null -> {
+                    Log.w(TAG, "指定语音引擎不可用：$wanted → 回退系统默认引擎")
+                    runCatching { engine?.shutdown() }
+                    tts = null
+                    initialized = false
+                    initializing = false
+                    lastFailAt = System.currentTimeMillis()
+                    lastFailReason = "指定的语音引擎不可用"
+                    main.post { enginePackage = null }   // setter → rebind() → init()
+                    notifyStatus()
+                }
+
                 // 设备没装 TTS 引擎（模拟器常见）或引擎异常：切在线兜底，不要静默失败
-                Log.e(
-                    TAG,
-                    "TTS 初始化失败, status=$st（设备可能未安装语音引擎；" +
-                        "Android 11+ 还需 Manifest 声明 TTS_SERVICE queries）→ 改用在线发音兜底"
-                )
-                runCatching { engine?.shutdown() }
-                tts = null
-                initialized = false
-                initializing = false
-                status = Status.NO_ENGINE
-                lastFailAt = System.currentTimeMillis()
-                lastFailReason = "未安装系统语音引擎"
-                mode = Mode.ONLINE
-                notifyStatus()
-                flushPending()
-                return@TextToSpeech
+                st != TextToSpeech.SUCCESS || engine == null -> {
+                    Log.e(
+                        TAG,
+                        "TTS 初始化失败, status=$st（设备可能未安装语音引擎；" +
+                            "Android 11+ 还需 Manifest 声明 TTS_SERVICE queries）→ 改用在线发音兜底"
+                    )
+                    runCatching { engine?.shutdown() }
+                    tts = null
+                    initialized = false
+                    initializing = false
+                    status = Status.NO_ENGINE
+                    lastFailAt = System.currentTimeMillis()
+                    lastFailReason = "未安装系统语音引擎"
+                    mode = Mode.ONLINE
+                    notifyStatus()
+                    flushPending()
+                }
+
+                else -> {
+                    engineName = systemDefaultEngine()
+                    engine.setSpeechRate(rate)
+                    engine.setPitch(1.0f)
+                    engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                        override fun onStart(utteranceId: String?) {}
+
+                        override fun onDone(utteranceId: String?) {}
+
+                        @Deprecated("Deprecated in Java")
+                        override fun onError(utteranceId: String?) {
+                            Log.e(TAG, "TTS onError id=$utteranceId")
+                        }
+
+                        override fun onError(utteranceId: String?, errorCode: Int) {
+                            Log.e(TAG, "TTS onError id=$utteranceId code=$errorCode")
+                        }
+                    })
+                    initialized = true
+                    initializing = false
+                    applyLanguage(accent.locale)
+                    Log.i(TAG, "TTS 就绪 engine=${engineLabel()} locale=$resolvedLocale status=$status")
+                    notifyStatus()
+                    flushPending()
+                }
             }
-            engineName = runCatching { engine.defaultEngine }.getOrNull()
-            engine.setSpeechRate(rate)
-            engine.setPitch(1.0f)
-            engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                override fun onStart(utteranceId: String?) {}
-
-                override fun onDone(utteranceId: String?) {}
-
-                @Deprecated("Deprecated in Java")
-                override fun onError(utteranceId: String?) {
-                    Log.e(TAG, "TTS onError id=$utteranceId")
-                }
-
-                override fun onError(utteranceId: String?, errorCode: Int) {
-                    Log.e(TAG, "TTS onError id=$utteranceId code=$errorCode")
-                }
-            })
-            initialized = true
-            initializing = false
-            applyLanguage(accent.locale)
-            Log.i(TAG, "TTS 就绪 engine=$engineName locale=$resolvedLocale status=$status")
-            notifyStatus()
-            flushPending()
         }
+
+        tts = if (wanted.isNullOrBlank()) {
+            TextToSpeech(appContext, listener)
+        } else {
+            TextToSpeech(appContext, listener, wanted)
+        }
+    }
+
+    /** 切换引擎：释放旧引擎后重新初始化（设置页切换引擎时调用） */
+    private fun rebind() {
+        runCatching { tts?.shutdown() }
+        tts = null
+        initialized = false
+        initializing = false
+        status = Status.IDLE
+        mode = Mode.NONE
+        lastFailAt = 0L
+        lastFailReason = null
+        init()
+    }
+
+    /** 系统里已安装的语音引擎（供设置页选择） */
+    data class EngineItem(val pkg: String, val label: String, val isDefault: Boolean)
+
+    /** 系统当前默认的引擎包名（读 secure 设置 `tts_default_synth`，不依赖 TextToSpeech 实例） */
+    private fun systemDefaultEngine(): String? = runCatching {
+        android.provider.Settings.Secure.getString(
+            appContext.contentResolver, "tts_default_synth"
+        )
+    }.getOrNull()?.takeIf { it.isNotBlank() }
+
+    /**
+     * 设备上已安装的 TTS 引擎（列出响应 `android.intent.action.TTS_SERVICE` 的服务）。
+     *
+     * 这里不用 `TextToSpeech.getEngines()`：该 API 需要先持有实例、且在部分 SDK 上取不到。
+     * Manifest 已声明 `<queries>` 中的 TTS_SERVICE，Android 11+ 才查得到这些包。
+     * 列表为空通常意味着系统里没装任何引擎（模拟器常见），此时只能用在线发音。
+     */
+    fun engineItems(): List<EngineItem> {
+        val def = systemDefaultEngine()
+        val intent = android.content.Intent("android.intent.action.TTS_SERVICE")
+        val services = runCatching {
+            if (android.os.Build.VERSION.SDK_INT >= 33) {
+                appContext.packageManager.queryIntentServices(
+                    intent, android.content.pm.PackageManager.ResolveInfoFlags.of(0L)
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                appContext.packageManager.queryIntentServices(intent, 0)
+            }
+        }.getOrDefault(emptyList())
+        return services.mapNotNull { si ->
+            val info = si.serviceInfo ?: return@mapNotNull null
+            EngineItem(
+                pkg = info.packageName,
+                label = runCatching { info.loadLabel(appContext.packageManager).toString() }
+                    .getOrNull().orEmpty().ifBlank { info.packageName },
+                isDefault = info.packageName == def
+            )
+        }.distinctBy { it.pkg }
+    }
+
+    /** 当前生效的引擎显示名（用户指定优先，其次系统默认） */
+    fun engineLabel(): String {
+        val pkg = enginePackage ?: systemDefaultEngine()
+        if (pkg.isNullOrBlank()) return engineName ?: "系统默认"
+        return engineItems().firstOrNull { it.pkg == pkg }?.label ?: pkg
     }
 
     /**
@@ -235,7 +354,8 @@ class SpeechManager private constructor(context: Context) {
 
     /** 自检摘要，设置页直接展示 */
     fun statusText(): String = when {
-        mode == Mode.SYSTEM -> "系统语音引擎：${engineName ?: "默认"}（离线可用）"
+        preferOnline -> "在线发音（已选「始终在线发音」）"
+        mode == Mode.SYSTEM -> "系统语音引擎：${engineLabel()}（离线可用）"
         mode == Mode.SYSTEM_PENDING -> "正在初始化系统语音引擎…"
         mode == Mode.ONLINE -> {
             val why = lastFailReason ?: "系统语音引擎不可用"
@@ -253,6 +373,12 @@ class SpeechManager private constructor(context: Context) {
         if (!enabled) return false
         val clean = text.trim()
         if (clean.isEmpty()) return false
+
+        if (preferOnline) {
+            // 设置里选了「始终在线发音」：跳过系统引擎，保证跨设备音色一致
+            speakOnline(clean)
+            return true
+        }
 
         when (status) {
             Status.READY -> {

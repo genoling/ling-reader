@@ -61,6 +61,9 @@ class DictManager private constructor(private val context: Context) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val jobs = HashMap<String, Job>()
     private val states = LinkedHashMap<String, Status>()
+
+    /** 词典之外额外注册的下载资源（如语音引擎 APK），见 [register] */
+    private val extra = LinkedHashMap<String, DictResource>()
     private val main = Handler(Looper.getMainLooper())
 
     /** 状态变化回调，**主线程**回调；UI 在 DisposableEffect 里注册/注销 */
@@ -85,9 +88,21 @@ class DictManager private constructor(private val context: Context) {
 
     fun resources(): List<DictResource> = DictCatalog.resources
 
-    fun resourceOf(id: String): DictResource? = DictCatalog.byId(id)
+    /**
+     * 注册额外资源（如 `TtsCatalog` 里的语音引擎 APK），使其复用同一套
+     * 「下载 / 进度 / 取消 / 校验 / 删除 / 状态回调」机制。启动时调用一次即可。
+     */
+    fun register(resources: List<DictResource>) {
+        resources.forEach { res ->
+            extra[res.id] = res
+            if (!states.containsKey(res.id)) states[res.id] = Status(installed = fileReady(res))
+        }
+    }
 
-    fun statusOf(id: String): Status = states[id] ?: Status()
+    fun resourceOf(id: String): DictResource? = DictCatalog.byId(id) ?: extra[id]
+
+    fun statusOf(id: String): Status =
+        states[id] ?: resourceOf(id)?.let { Status(installed = fileReady(it)) } ?: Status()
 
     /** 该资源是否已就绪（可直接打开使用） */
     fun isInstalled(id: String): Boolean = statusOf(id).installed
@@ -211,6 +226,9 @@ class DictManager private constructor(private val context: Context) {
                 if (res.fileName.endsWith(".db") && !isSqlite(part)) {
                     throw IOException("文件不是有效的 SQLite 数据库，下载可能被劫持或损坏")
                 }
+                if (res.fileName.endsWith(".apk") && !isZip(part)) {
+                    throw IOException("文件不是有效的 APK 安装包，下载可能被劫持或损坏")
+                }
 
                 if (target.exists()) target.delete()
                 if (!part.renameTo(target)) throw IOException("写入目标文件失败（存储空间不足？）")
@@ -261,6 +279,16 @@ class DictManager private constructor(private val context: Context) {
         f.inputStream().use { input ->
             val head = ByteArray(16)
             input.read(head) == 16 && String(head, Charsets.US_ASCII).startsWith("SQLite format 3")
+        }
+    } catch (e: Exception) {
+        false
+    }
+
+    /** APK 本质是 ZIP 包，头两字节固定为 `PK`（避免把损坏/被劫持的文件递给系统安装器） */
+    private fun isZip(f: File): Boolean = try {
+        f.inputStream().use { input ->
+            val head = ByteArray(4)
+            input.read(head) == 4 && head[0] == 0x50.toByte() && head[1] == 0x4B.toByte()
         }
     } catch (e: Exception) {
         false

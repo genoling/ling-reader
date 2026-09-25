@@ -29,6 +29,8 @@ import com.lreader.dict.DictManager
 import com.lreader.dict.DictResource
 import com.lreader.dict.LevelDictionary
 import com.lreader.speech.SpeechManager
+import com.lreader.speech.TtsCatalog
+import com.lreader.speech.TtsInstaller
 import com.lreader.translate.TranslationEngines
 import com.lreader.ui.theme.AppThemeState
 import com.lreader.ui.theme.ThemePreset
@@ -48,6 +50,7 @@ fun SettingsScreen() {
     val dictMgr = remember { DictManager.get(context) }
 
     var dictCount by remember { mutableStateOf(0) }
+    var suppCount by remember { mutableStateOf(0) }
     var levelTotal by remember { mutableStateOf(0) }
     var vocabCount by remember { mutableStateOf(0) }
     /** 状态刷新令牌：资源管理器通知变化时自增，驱动词条数/按钮状态重算 */
@@ -70,11 +73,14 @@ fun SettingsScreen() {
     val speech = SpeechManager.get(context)
     var speechStatus by remember { mutableStateOf(speech.statusText()) }
     var speechError by remember { mutableStateOf<String?>(null) }
+    /** 设备上已安装的语音引擎；装了新引擎后点「刷新」重新读取 */
+    var engineItems by remember { mutableStateOf(speech.engineItems()) }
 
     // 词典安装状态变化（下载完成 / 被删除）后重新统计词条数
     LaunchedEffect(dictVersion) {
         withContext(Dispatchers.IO) {
             dictCount = if (dict.ensureReady()) dict.entryCount else 0
+            suppCount = dict.supplementCount
         }
     }
 
@@ -175,6 +181,7 @@ fun SettingsScreen() {
                             sizeOnDisk = dictMgr.sizeOnDisk(res),
                             entryCount = when (res.id) {
                                 DictCatalog.ID_MAIN -> dictCount
+                                DictCatalog.ID_ECDICT -> suppCount
                                 DictCatalog.ID_LEVELS -> levelTotal
                                 else -> 0
                             },
@@ -288,6 +295,84 @@ fun SettingsScreen() {
                         valueRange = 0.5f..2.0f,
                         steps = 5
                     )
+
+                    Spacer(Modifier.height(10.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("语音引擎", fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                        Spacer(Modifier.weight(1f))
+                        TextButton(
+                            onClick = {
+                                engineItems = speech.engineItems()
+                                speechStatus = speech.statusText()
+                            },
+                            contentPadding = PaddingValues(0.dp)
+                        ) { Text("刷新", fontSize = 12.sp) }
+                    }
+                    Hint(
+                        "手机与平板发音不同，是因为各自用了本机的默认引擎；两台设备选同一个引擎即可统一。" +
+                            "列表里没有想要的引擎时，先在系统里装好，再回来点「刷新」。"
+                    )
+                    EngineRow(
+                        title = "跟随系统默认",
+                        subtitle = "由系统的「文字转语音 → 首选引擎」决定",
+                        selected = settings.ttsEngine.isBlank() && !settings.preferOnlineSpeech
+                    ) {
+                        settings.ttsEngine = ""
+                        settings.preferOnlineSpeech = false
+                        // 先记录引擎选择、再关掉强制在线：后者才真正把系统引擎建起来
+                        speech.enginePackage = null
+                        speech.preferOnline = false
+                        speech.speak("hello")
+                    }
+                    engineItems.forEach { item ->
+                        EngineRow(
+                            title = item.label,
+                            subtitle = item.pkg + if (item.isDefault) "（系统默认）" else "",
+                            selected = settings.ttsEngine == item.pkg && !settings.preferOnlineSpeech
+                        ) {
+                            settings.ttsEngine = item.pkg
+                            settings.preferOnlineSpeech = false
+                            speech.enginePackage = item.pkg
+                            speech.preferOnline = false
+                            speech.speak("hello")
+                        }
+                    }
+                    if (engineItems.isEmpty()) {
+                        Hint("没有检测到系统语音引擎（部分模拟器如此），可直接打开下面的在线发音。")
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+                    Divider()
+                    Spacer(Modifier.height(8.dp))
+                    Text("安装离线语音引擎（可选）", fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                    Spacer(Modifier.height(4.dp))
+                    Hint(
+                        "开源离线引擎（sherpa-onnx，Apache-2.0），音质比系统自带的机械音自然得多。" +
+                            "下载完点「安装」，系统会弹窗确认（首次需允许「安装未知来源应用」）；" +
+                            "装好后回到上面的「语音引擎」选中它即可。仅支持 arm64 设备。"
+                    )
+                    TtsCatalog.ENGINES.forEachIndexed { i, eng ->
+                        if (i > 0) Spacer(Modifier.height(10.dp))
+                        TtsEngineRow(
+                            res = eng,
+                            status = dictMgr.statusOf(eng.id),
+                            sizeOnDisk = dictMgr.sizeOnDisk(eng),
+                            onDownload = { dictMgr.download(eng) },
+                            onCancel = { dictMgr.cancel(eng) },
+                            onInstall = {
+                                TtsInstaller.install(context, dictMgr.fileOf(eng)).onFailure {
+                                    speechError = "安装失败：${it.message ?: "无法打开系统安装界面"}"
+                                }
+                            },
+                            onRemove = { dictMgr.remove(eng) }
+                        )
+                    }
+
+                    SwitchRow("始终使用在线发音（免装引擎、音色统一）", settings.preferOnlineSpeech) { on ->
+                        settings.preferOnlineSpeech = on
+                        speech.preferOnline = on
+                        speech.speak("hello")
+                    }
 
                     Spacer(Modifier.height(10.dp))
                     Divider()
@@ -540,6 +625,118 @@ private fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Un
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(label, fontSize = 14.sp, modifier = Modifier.weight(1f))
         Switch(checked = checked, onCheckedChange = onChange)
+    }
+}
+
+/** 语音引擎单选一行（标题 + 包名小字） */
+@Composable
+private fun EngineRow(
+    title: String,
+    subtitle: String? = null,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        RadioButton(selected = selected, onClick = onClick)
+        Column(Modifier.weight(1f)) {
+            Text(title, fontSize = 13.sp)
+            if (!subtitle.isNullOrBlank()) {
+                Text(
+                    subtitle,
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 语音引擎资源一行：名称 / 说明 / 体积 / 下载·安装·删除。
+ *
+ * APK 体积大（50~330MB）且不能静默安装，所以状态只有四种：
+ * 未下载 →（下载中）→ 已下载（点「安装」交给系统安装器）。
+ */
+@Composable
+private fun TtsEngineRow(
+    res: DictResource,
+    status: DictManager.Status,
+    sizeOnDisk: Long,
+    onDownload: () -> Unit,
+    onCancel: () -> Unit,
+    onInstall: () -> Unit,
+    onRemove: () -> Unit
+) {
+    Column(Modifier.fillMaxWidth()) {
+        Text(res.name, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+        Text(
+            res.description,
+            fontSize = 11.sp,
+            lineHeight = 16.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.height(2.dp))
+        when {
+            status.downloading -> {
+                LinearProgressIndicator(
+                    progress = status.progress,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "下载中 ${(status.progress * 100).toInt()}% / ${DictCatalog.formatSize(res.sizeBytes)}",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.weight(1f))
+                    TextButton(onClick = onCancel, contentPadding = PaddingValues(0.dp)) {
+                        Text("取消", fontSize = 12.sp)
+                    }
+                }
+            }
+
+            status.installed -> Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "已下载 · ${DictCatalog.formatSize(sizeOnDisk)}",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = onInstall, contentPadding = PaddingValues(0.dp)) {
+                    Text("安装", fontSize = 12.sp)
+                }
+                Spacer(Modifier.width(8.dp))
+                TextButton(onClick = onRemove, contentPadding = PaddingValues(0.dp)) {
+                    Text("删除", fontSize = 12.sp)
+                }
+            }
+
+            else -> Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    DictCatalog.formatSize(res.sizeBytes),
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = onDownload, contentPadding = PaddingValues(0.dp)) {
+                    Text("下载", fontSize = 12.sp)
+                }
+            }
+        }
+        status.error?.let {
+            Text(
+                it,
+                fontSize = 11.sp,
+                lineHeight = 16.sp,
+                color = MaterialTheme.colorScheme.error
+            )
+        }
     }
 }
 

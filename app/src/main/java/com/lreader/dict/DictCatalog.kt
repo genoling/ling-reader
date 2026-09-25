@@ -1,7 +1,7 @@
 package com.lreader.dict
 
 /**
- * 词典资源描述。
+ * 远程资源描述（词典库 / 语音引擎 APK 共用同一套下载机制）。
  *
  * @param id            内部标识（设置页与状态表用它做 key）
  * @param name          展示名
@@ -11,6 +11,8 @@ package com.lreader.dict
  * @param sizeBytes     预期字节数，用于展示与下载完整性校验（0 = 不校验）
  * @param assetName     APK `assets/` 内的同名后备文件；非 null 表示「随包内置」，首次使用时释放
  * @param removable     是否允许在设置页删除（内置资源删了会让分级高亮永久失效，故禁止）
+ * @param releaseTag    所在 Release tag；为 null 时用下载源前缀直接拼 [remoteFile]（内置资源用不到）
+ * @param absoluteUrl   写死的完整下载地址（如第三方镜像上的语音引擎 APK），非空时优先使用
  */
 data class DictResource(
     val id: String,
@@ -20,7 +22,9 @@ data class DictResource(
     val remoteFile: String,
     val sizeBytes: Long,
     val assetName: String? = null,
-    val removable: Boolean = true
+    val removable: Boolean = true,
+    val releaseTag: String? = null,
+    val absoluteUrl: String? = null
 )
 
 /**
@@ -39,27 +43,48 @@ object DictCatalog {
 
     const val REPO = "genoling/ling-reader"
     const val RELEASE_TAG = "dict-v1"
+    const val RELEASE_TAG_ECDICT = "dict-v2"
 
     /** 默认下载源前缀（必须以 `/` 结尾，后面直接拼附件名） */
     const val DEFAULT_SOURCE =
         "https://github.com/$REPO/releases/download/$RELEASE_TAG/"
 
     const val ID_MAIN = "en_zh"
+    const val ID_ECDICT = "ecdict"
     const val ID_LEVELS = "levels"
 
     /**
-     * 主词典：**不随包内置**，用户按需下载（APK 体积因此从 130MB+ 降到 10MB 级）。
+     * 主词典：**不随包内置**，用户按需下载（APK 体积因此从 130MB+ 降到 19MB）。
      * `sizeBytes` 取自构建产物 `dict_en_zh.min.db` 的实际大小（120,348,672 B）。
      */
     val MAIN = DictResource(
         id = ID_MAIN,
         name = "21世纪大英汉词典",
-        description = "33.2 万词条，含音标与中文释义；离线查询、无次数限制。",
+        description = "33.2 万词条，含音标与专业义项；离线查询、无次数限制。**建议与补充词典一起下载**。",
         fileName = "dict_en_zh.db",
         remoteFile = "dict_en_zh.min.db",
         sizeBytes = 120_348_672L,
         assetName = null,
-        removable = true
+        removable = true,
+        releaseTag = RELEASE_TAG
+    )
+
+    /**
+     * ECDICT 补充词典（由 `ecdict.csv` 转换，MIT）：77 万词条、99.8% 带中文释义，
+     * 并附 9.5 万条**变形 → 原形**映射表（`lemma` 表），既补收词量也提高词形还原准确度。
+     *
+     * 查询顺序：主词典优先，主词典查不到（或词形还原失败）时回退到这里。
+     */
+    val ECDICT = DictResource(
+        id = ID_ECDICT,
+        name = "ECDICT 补充词典",
+        description = "77 万词条（99.8% 带中文释义）+ 变形表；主词典查不到时自动回退查询，需配合主词典使用。",
+        fileName = "ecdict.db",
+        remoteFile = "ecdict.db",
+        sizeBytes = 133_664_768L,
+        assetName = null,
+        removable = true,
+        releaseTag = RELEASE_TAG_ECDICT
     )
 
     /**
@@ -77,7 +102,7 @@ object DictCatalog {
         removable = false
     )
 
-    val resources: List<DictResource> = listOf(MAIN, LEVELS)
+    val resources: List<DictResource> = listOf(MAIN, ECDICT, LEVELS)
 
     fun byId(id: String): DictResource? = resources.firstOrNull { it.id == id }
 
@@ -88,7 +113,20 @@ object DictCatalog {
         return if (o.endsWith("/")) o else "$o/"
     }
 
-    fun urlOf(res: DictResource, override: String?): String = sourceOf(override) + res.remoteFile
+    /**
+     * 资源下载地址。
+     *
+     * 优先级：`absoluteUrl`（语音引擎这类写死的第三方镜像地址）
+     * → 用户自定义下载源（镜像 / 自建服务器，前缀 + 附件名）
+     * → 默认 GitHub Release（按资源各自的 tag 拼）。
+     */
+    fun urlOf(res: DictResource, override: String?): String {
+        res.absoluteUrl?.let { return it }
+        val o = override?.trim().orEmpty()
+        if (o.isNotEmpty()) return sourceOf(o) + res.remoteFile
+        val tag = res.releaseTag ?: return sourceOf(null) + res.remoteFile
+        return "https://github.com/$REPO/releases/download/$tag/${res.remoteFile}"
+    }
 
     /** 人类可读体积，如 `115 MB` / `4.6 MB` / `512 KB` */
     fun formatSize(bytes: Long): String = when {

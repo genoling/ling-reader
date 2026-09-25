@@ -54,7 +54,13 @@ data class DictEntry(
     /** 该词所属的分级（CET4/CET6/…），可能为空 */
     val level: String? = null,
     val levelName: String? = null,
-    val phonetic: String? = null
+    val phonetic: String? = null,
+    /**
+     * 释义取自哪个词条。查 `receptiveness` 时词典只收了 `receptive`，
+     * 这里即为 `receptive`；UI 必须明说「未收录，以下为词根释义」，
+     * 否则用户会以为查错了词。
+     */
+    val formOf: String? = null
 )
 
 /**

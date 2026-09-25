@@ -124,6 +124,16 @@ fun DictBottomSheet(
                 }
             }
 
+            // 词形还原命中：用户查的词词典没直接收录，必须说清释义来自哪个词条
+            entry?.formOf?.takeIf { it.isNotBlank() }?.let { root ->
+                Text(
+                    "未收录「$word」，以下为词根「$root」的释义",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 6.dp)
+                )
+            }
+
             Spacer(Modifier.height(6.dp))
             Divider()
             Spacer(Modifier.height(6.dp))
@@ -299,16 +309,38 @@ fun DictHtmlView(
                 // 词典正文不需要交互：不消费触摸事件，滚动手势留给外层弹层
                 override fun onTouchEvent(event: MotionEvent?): Boolean = false
             }.apply {
+                /**
+                 * 高度**只增不减**。WebView 自身不接收滚动（见上），一旦量小了，
+                 * 被裁掉的一段既看不到也滑不到 —— conversion 这类多义项词条就是这样被截断的。
+                 * 排版与字体渲染都是异步的，单次 contentHeight 常常偏小，故分几档补测取最大值。
+                 */
+                fun growTo(px: Int) {
+                    if (px > 0) {
+                        val withSlack = px + HEIGHT_SLACK_PX
+                        if (withSlack > contentPx) contentPx = withSlack
+                    }
+                }
+
                 webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView, url: String?) {
-                        // 等排版完成再量高度：contentHeight 是屏幕像素
-                        view.post {
-                            val h = view.contentHeight
-                            if (h > 0 && h != contentPx) contentPx = h
+                        MEASURE_DELAYS_MS.forEach { delayMs ->
+                            view.postDelayed({
+                                if (!view.isAttachedToWindow) return@postDelayed
+                                growTo(view.contentHeight)
+                                // 视口宽度/缩放会干扰 contentHeight，再用 DOM 真实高度兜一层
+                                view.evaluateJavascript(JS_DOC_HEIGHT) { raw ->
+                                    val css = raw?.trim('"', ' ', '\n')?.toFloatOrNull()
+                                    // CSS px → 物理 px 的换算比就是屏幕密度（getScale 已废弃）
+                                    val dens = view.resources.displayMetrics.density
+                                    if (css != null && css > 0f && dens > 0f) {
+                                        growTo((css * dens).toInt() + 2)
+                                    }
+                                }
+                            }, delayMs)
                         }
                     }
                 }
-                settings.javaScriptEnabled = false
+                settings.javaScriptEnabled = true   // 仅用于读取 DOM 高度，页面本身不含脚本
                 settings.defaultTextEncodingName = "utf-8"
                 settings.loadWithOverviewMode = false
                 settings.useWideViewPort = false
@@ -326,6 +358,18 @@ fun DictHtmlView(
         }
     )
 }
+
+/** 补测时点（毫秒）：覆盖排版完成、字体加载、文本重排几个阶段 */
+private val MEASURE_DELAYS_MS = longArrayOf(0L, 120L, 360L, 800L)
+
+/** 额外留白，避免最后一行下缘被裁掉 */
+private const val HEIGHT_SLACK_PX = 10
+
+/** 文档真实高度（CSS 像素） */
+private const val JS_DOC_HEIGHT =
+    "(function(){var b=document.body,d=document.documentElement;" +
+        "return Math.ceil(Math.max(b.scrollHeight,b.offsetHeight,d.clientHeight," +
+        "d.scrollHeight,d.offsetHeight));})()"
 
 private val WRAP_HTML = """
 <!DOCTYPE html>

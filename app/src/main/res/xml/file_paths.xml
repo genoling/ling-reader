@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FileProvider 可对外共享的目录。
+  目前只有「下载的语音引擎 APK」需要交给系统安装器（见 TtsInstaller），
+  文件都落在 filesDir 根目录，故 path="." 。
+-->
+<paths>
+    <files-path name="files" path="." />
+</paths>

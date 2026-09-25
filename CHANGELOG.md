@@ -3,6 +3,60 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与 [语义化版本](https://semver.org/lang/zh-CN/)。
 版本号对应 `app/build.gradle.kts` 中的 `versionName` / `versionCode`。
 
+## [1.2.0] - 2026-09-25
+
+**新增：ECDICT 补充词典（77 万词条）、离线语音引擎一键下载安装、发音引擎可切换；修复查词弹层长词条被截断、派生词查不到。**
+
+**新增**
+- 设置页「发音」新增**语音引擎**列表：列出设备上已安装的 TTS 引擎（显示名称 + 包名 + 「系统默认」标记），
+  选中即试听并持久化，切换后自动重新绑定引擎（旧引擎 shutdown → 新引擎 init）。
+- 新增**「始终使用在线发音」**开关：跳过系统引擎统一走在线发音（有道），
+  适合设备没装引擎、或想让两台设备音色完全一致的用户（代价是需联网）。
+- `SettingsStore` 新增 `ttsEngine` / `preferOnlineSpeech`；`SpeechManager` 新增
+  `enginePackage` / `preferOnline` / `engineItems()` / `engineLabel()`，由 `LRreaderApp` 在启动时套用。
+- 引擎枚举改用「`Settings.Secure.tts_default_synth` + `queryIntentServices(TTS_SERVICE)`」实现，
+  不依赖 `TextToSpeech.getEngines()`（该 API 需要先持有实例，且在部分 SDK 上取不到）。
+
+**新增 · 词典**
+- **ECDICT 补充词典**（Release `dict-v2`，127.5 MB / 770,611 词条，99.8% 带中文释义，MIT）：
+  由 `ecdict.csv` 转换而来，表结构与主词典一致，另带 **95,424 条「变形 → 原形」表**（`lemma`）。
+  查询顺序改为 **主词典 → 补充词典**：主词典查不到（含词形还原失败）时自动回退，
+  于是 `Abkhazia` 这类专名与大量派生词不再显示「未收录」。
+  它与主词典一样按需下载，复用 `DictManager` 的下载 / 校验 / 删除机制，**安装包体积不变**。
+- 补充词典文件变动（刚下载完 / 刚被删除）会被**热探测**（长度 xor 修改时间指纹）识别，**无需重启 App 即生效**。
+
+**新增 · 发音**
+- 设置页「发音」新增**安装离线语音引擎**：4 档开源引擎（sherpa-onnx 官方 APK，Apache-2.0，一包一模型）
+  从 hf-mirror 一键下载 → 交系统安装器安装，音质远好于多数系统自带引擎。
+  下载复用 `DictManager`（新增 `register()`，支持词典之外的资源），安装走 `FileProvider` + `ACTION_VIEW`
+  + `REQUEST_INSTALL_PACKAGES`（Android 不允许静默安装，需用户在系统弹窗确认）。
+
+**修复**
+- **查词弹层长词条被截断**：`conversion` 这类多义项词条只能看到前两行，且**无法滑到被截掉的部分**。
+  根因是 `DictHtmlView` 的 WebView 自身不接收滚动（手势交给外层弹层），而高度只在 `onPageFinished` 后测一次；
+  排版与字体异步完成时量出的 `contentHeight` 偏小，超出部分既看不到也滑不到。
+  现改为**高度只增不减**：在 0 / 120 / 360 / 800ms 分档补测 `contentHeight`，
+  并注入 JS 读取 DOM 真实高度兜底，另加 10px 余量。
+- **派生词查不到**：词典只收了 `receptive`、没收 `receptiveness`，点词得到「未收录该单词」。
+  `DictDatabase.resolveKey` 的还原规则从 5 条扩展到**屈折 + 派生两层**
+  （新增 -ness / -ment / -tion / -sion / -ance / -ence / -ity / -able / -ive / -ous / -ism / -ist / -ize / -ful / -less …
+  以及 -ably→-able、-ibly→-ible、-ly→-le、-ves→-f/-fe 等），
+  24 个真实外刊派生词回归：**23/23 全部命中**（改前 19/23）。
+- 命中词根时弹层新增一行提示「未收录「X」，以下为词根「Y」的释义」（`DictEntry.formOf`），
+  避免用户以为点错了词。
+- 词条正文**完全没有中文**时（如 `vt. subdue的变形`、化学名词 `= 1-octene`），
+  追加一行说明，不再只显示一行词性。
+
+**校验（设备自测，MuMu / Android 12）**
+- 词典：设置页正确显示三档资源；`Abkhazia` 经补充词典出中文释义；`receptiveness` 提示词根并给出 `receptive` 释义；
+  `conversion` 10 个义项全部可见且能滑到底（含【橄榄球】【精神病学】【计算机】）。
+- 补充词典：删除 → 点下载 → 20 秒完成 → **无需重启即显示「已安装 · 127.5 MB · 770611 词条」**。
+- 引擎：4 档列表与体积正确；「下载」48.6 MB 成功；「安装」成功拉起系统安装器（"要安装此应用吗？"）。
+- 23 个派生词回归 23/23；`assembleDebug` 零警告；
+  `versionCode` 11 → **12**，`versionName` `1.1.0` → **`1.2.0`**；APK 19.1 MB。
+
+---
+
 ## [1.1.0] - 2026-09-23
 
 **架构改造：本地词典框架重构 —— 主词典改为「按需下载」，安装包 133.6MB → 19.1MB。**

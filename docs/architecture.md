@@ -142,8 +142,16 @@ ling-reader/                       # ★ Android 工程根目录（GitHub 仓库
 - `ensureReady()`：**不再拷贝 assets、不联网**，只打开本地文件；文件缺失或被外部删除时返回 false 并释放旧句柄
   （`isInstalled()` / `isExtracted()` 均可探测安装状态）。
 - 表结构：`dict(word TEXT PRIMARY KEY, html BLOB)`，html 是 **zlib 压缩**的 UTF-8 片段。
-- `lookup(word, levels)` → 词形还原后查询，解压 HTML，附带分级信息。
-- `resolveKey()` 候选顺序：原词 → 小写 → 首字母大写 → 去 s/es/ies/ed/ing/ly/er/est 变形。
+- `lookup(word, levels)` → 词形还原后查询，解压 HTML，附带分级信息；
+  **主词典 miss 时自动回退到 ECDICT 补充词典**（`DictCatalog.ECDICT`，77 万词条，另带 `lemma` 变形表）。
+- 两个库表结构一致（`dict(word, html)`），补充词典多一张 `lemma(form, base)`（94,524 条，来自 ECDICT 的 `exchange` 字段）；
+  它是可选资源，文件变动用 `supStamp`（长度 xor 修改时间）热探测，下载完 / 删除后无需重启 App 即生效。
+- `resolveKey()` 候选顺序：原词 → 小写 → 首字母大写 → **词形还原两层**：
+  ① 屈折（-s / -es / -ies / -ed / -ing / -er / -est / -ves / -ier / 撇号缩写）；
+  ② 派生后缀（-ness / -ment / -tion / -sion / -ance / -ence / -ity / -able / -ible / -ive / -ous /
+  -ism / -ist / -ize / -ful / -less / -ish / -ary / -ory / -ly / -al / -ic，外加 -ably→-able、-ibly→-ible、-ly→-le）。
+  派生命中时 `DictEntry.formOf` 记录源词，弹层显示「未收录 X，以下为词根 Y 的释义」。
+- `ensureReadable()`：词条正文一个中文都没有时（如 `vt. subdue的变形`、化学名词 `= 1-octene`）追加一行说明，避免只剩一行词性。
 - `enrichFormEntry()`：词条若是「xx的变形」型交叉引用（`WordAnalysis.crossRefTarget`），
   取出源词词条正文拼在其后（原词无音标时继承源词音标），保证任何词性都能看到中文释义。
 
@@ -158,6 +166,16 @@ ling-reader/                       # ★ Android 工程根目录（GitHub 仓库
   （每页各自 init/shutdown 是「首次点词没声音」的主因），`LRreaderApp.onCreate()` 启动即 `init()`。
 - 首选 `android.speech.tts.TextToSpeech`（离线、无次数限制）：
   - `Accent` 枚举 `US`(美音) / `UK`(英音)；`rate` 语速（0.5~2.0）；`enabled` 开关。
+  - **`enginePackage`**：指定引擎（空 = 跟随系统默认），用三参构造 `TextToSpeech(ctx, listener, pkg)` 绑定；
+    赋值即 `rebind()`（旧引擎 shutdown → 重新 init），指定引擎不可用时回退系统默认并重试一次。
+  - **`preferOnline`**：强制走在线发音（跳过系统引擎，手机 / 平板音色一致，代价是联网）。
+  - **离线引擎下载安装**：`TtsCatalog` 列出 4 档 sherpa-onnx 官方引擎 APK（Apache-2.0、一包一模型，
+    托管在 hf-mirror），经 `DictManager.register()` 登记后与词典共用同一套下载机制；
+    下载完由 `TtsInstaller` 经 FileProvider（`${applicationId}.fileprovider`）交给系统安装器
+    （`ACTION_VIEW` + `application/vnd.android.package-archive`），用户确认后才真正安装。
+  - `engineItems()` 枚举设备上的引擎：`Settings.Secure.tts_default_synth` 取默认引擎，
+    `queryIntentServices("android.intent.action.TTS_SERVICE")` 取引擎列表（Android 11+ 依赖 Manifest 的 `<queries>` 声明）。
+    **刻意不用** `TextToSpeech.getEngines()` —— 该 API 需先持有实例，且在部分 SDK 上取不到。
   - 语言逐级回退：用户选择 → 另一种口音 → `Locale.ENGLISH` → 引擎默认。
   - 初始化失败（设备无引擎，模拟器常见）记录原因并进入 **15 秒冷却**，不再每次点击都重建引擎。
 - **在线发音兜底**：系统引擎不可用（或 `speak()` 返回 ERROR）时改用有道 `dictvoice` 免费接口
@@ -268,8 +286,10 @@ bookId 用 `URLEncoder/URLDecoder` 编解码（因为它可能是文件路径）
 **`ui/reader/DictBottomSheet.kt`**
 - `DictBottomSheet`：单词标题 + 音标 + 级别标签 + 发音按钮 + 收藏按钮 + WebView 释义 + 整句翻译区
   - 外层 `Column` 整体 `verticalScroll`（**不设 maxHeight**）：释义再长也能一路滑到「原文句子 / 译文」
-- `DictHtmlView(html, autoHeight)`：测量 WebView `contentHeight` 后按内容撑开，
-  `onTouchEvent` 恒返回 false 不消费触摸，滚动手势交还外层弹层
+- `DictHtmlView(html, autoHeight)`：按内容撑开 WebView 高度，`onTouchEvent` 恒返回 false 不消费触摸，
+  滚动手势交还外层弹层。**高度只增不减**：WebView 既然不接收滚动，一旦量小，超出部分就永久看不到
+  （`conversion` 这类多义项词条曾被截断）——现在 0/120/360/800ms 分档补测 `contentHeight`，
+  再用注入 JS 读 DOM 真实高度取最大值，另加 10px 余量
 - `SentenceSheet`：独立整句翻译弹层（同样可滚动）
 - `WRAP_HTML` 常量：包裹词典 HTML 的样式模板（含 `.xref` 变形词提示样式）
 
