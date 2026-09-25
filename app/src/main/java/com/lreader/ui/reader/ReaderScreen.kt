@@ -93,7 +93,10 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
     /** 主词典是否已下载（未下载时点词只提示去设置） */
     var dictInstalled by remember { mutableStateOf(true) }
     var enabledLevels by remember { mutableStateOf(settings.enabledLevels) }
+    // 高亮用词集合：原形 + 正文里点过的词形（含变形词），
+    // ⚠️ 所以**不能**用 vocabWords.size 当生词数量（会偏大），数量单独用 vocabCount
     var vocabWords by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var vocabCount by remember { mutableStateOf(0) }
     var fontSize by remember { mutableStateOf(settings.fontSize) }
     var lineHeight by remember { mutableStateOf(settings.lineHeight) }
     var highlightVocab by remember { mutableStateOf(settings.highlightVocab) }
@@ -105,6 +108,8 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
     val theme = ReadingTheme.of(themeIndex)
     var pages by remember { mutableStateOf<List<ReaderPage>>(emptyList()) }
     var pageIndex by remember { mutableStateOf(0) }
+    /** 章首右滑回退到上一章时置 true：进入上一章后定位到它的最后一页（像翻书一样连续） */
+    var openAtLastPage by remember { mutableStateOf(false) }
     var showParams by remember { mutableStateOf(false) }
     var showDetail by remember { mutableStateOf(false) }
     var showToc by remember { mutableStateOf(false) }
@@ -158,8 +163,12 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
 
         // 等启动时的云同步跑完（最多几秒）：否则刚进 App 就点进书时，生词高亮用的是同步前的旧数据
         withContext(Dispatchers.IO) { SyncManager.awaitInitialSync() }
-        // 统一小写，保证「生词红色高亮」与正文大小写无关
-        vocabWords = withContext(Dispatchers.IO) { vocab.all().map { it.word.lowercase() }.toSet() }
+        // 统一小写，保证「生词红色高亮」与正文大小写无关；
+        // ⚠️ 必须用 highlightWords()（原形 + 正文里点过的词形）：只拿 word（原形）时，
+        // 正文里的变形词（walked ← walk）永远标不红、再点还会显示「已收藏」（v1.6.2 修）
+        val (hl, cnt) = withContext(Dispatchers.IO) { vocab.highlightWords() to vocab.count() }
+        vocabWords = hl
+        vocabCount = cnt
 
         loading = false
     }
@@ -221,7 +230,7 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
                 },
                 actions = {
                     Text(
-                        "生词 ${vocabWords.size}",
+                        "生词 $vocabCount",
                         fontSize = 11.sp,
                         modifier = Modifier.padding(end = 2.dp),
                         color = MaterialTheme.colorScheme.primary
@@ -289,6 +298,8 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
                     // 定位到上次读到的页码（首次进入为 0）；页码无效时用 restorePercent
                     initialPage = pageIndex,
                     initialPercent = restorePercent,
+                    // 章首右滑回退进来的章：落在它的最后一页，读起来才像翻书
+                    initialAtEnd = openAtLastPage,
                     theme = theme,
                     enabledLevels = enabledLevels,
                     levels = levels,
@@ -299,29 +310,31 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
                     fontSize = fontSize,
                     lineHeight = lineHeight,
                     onPagesReady = { pages = it },
-                    onPageChanged = { pageIndex = it },
+                    // 定位完成后立刻复位：否则改字号 / 行距重新分页时会又跳回章末
+                    onPageChanged = { pageIndex = it; if (openAtLastPage) openAtLastPage = false },
+                    // 跨章滑动：章末左滑 → 下一章第 1 页；章首右滑 → 上一章最后一页
+                    onNextChapter = {
+                        if (chapterIndex < chapters.size - 1) {
+                            chapterIndex++
+                            pageIndex = 0
+                            openAtLastPage = false
+                            saveProgress()
+                        }
+                    },
+                    onPrevChapter = {
+                        if (chapterIndex > 0) {
+                            chapterIndex--
+                            pageIndex = 0
+                            openAtLastPage = true
+                            saveProgress()
+                        }
+                    },
                     onPullDown = { showParams = true },
                     // 书内超链接（EPUB 目录页 / 栏目页）→ 跳到目标章节
                     onInternalLink = { target ->
                         val idx = chapters.indexOfFirst { it.sourcePath == target }
                         if (idx >= 0 && idx != chapterIndex) {
                             chapterIndex = idx
-                            pageIndex = 0
-                            saveProgress()
-                        }
-                    },
-                    hasPrevChapter = chapterIndex > 0,
-                    hasNextChapter = chapterIndex < chapters.size - 1,
-                    onPrevChapter = {
-                        if (chapterIndex > 0) {
-                            chapterIndex--
-                            pageIndex = 0
-                            saveProgress()
-                        }
-                    },
-                    onNextChapter = {
-                        if (chapterIndex < chapters.size - 1) {
-                            chapterIndex++
                             pageIndex = 0
                             saveProgress()
                         }
@@ -434,15 +447,21 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
             onSpeak = { speech.speak(dictEntry?.word ?: w) },
             onRemoveVocab = {
                 val target = dictEntry?.word ?: w
-                vocabWords = vocabWords - target.lowercase()
                 scope.launch {
-                    withContext(Dispatchers.IO) { vocab.removeByWord(target) }
+                    val (hl, cnt) = withContext(Dispatchers.IO) {
+                        vocab.removeByWord(target)
+                        // 删完重读集合：这个词之前记过的变形词（walked…）也要一起不再标红，
+                        // 只减原形会留下「删了生词正文还是红的」
+                        vocab.highlightWords() to vocab.count()
+                    }
+                    vocabWords = hl
+                    vocabCount = cnt
                 }
             },
             onAddVocab = {
                 val e = dictEntry
                 scope.launch {
-                    val added = withContext(Dispatchers.IO) {
+                    val (hl, cnt) = withContext(Dispatchers.IO) {
                         vocab.add(
                             com.lreader.model.VocabWord(
                                 word = e?.word ?: w,
@@ -456,12 +475,15 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
                                 sentence = selectedSentence,
                                 sourceBook = book?.title ?: "",
                                 level = e?.level ?: ""
-                            )
+                            ),
+                            // form = 正文里点到的**实际词形**：词典原形是 walk，正文点到的是
+                            // walked，不记词形的话正文永远标不红、再点还显示「已收藏」（v1.6.2 修）
+                            form = w
                         )
+                        vocab.highlightWords() to vocab.count()
                     }
-                    if (added) {
-                        vocabWords = vocabWords + (e?.word ?: w).lowercase()
-                    }
+                    vocabWords = hl
+                    vocabCount = cnt
                 }
             },
             onTranslateSentence = {
@@ -534,7 +556,7 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
                 pageIndex = pageIndex,
                 pageCount = pages.size,
                 charCount = chapters.getOrNull(chapterIndex)?.content?.length ?: 0,
-                vocabCount = vocabWords.size,
+                vocabCount = vocabCount,
                 onPrevChapter = {
                     if (chapterIndex > 0) { chapterIndex--; pageIndex = 0; saveProgress() }
                 },
@@ -672,8 +694,8 @@ private fun WordText(
     bold: Boolean = false,
     /** 栏目 / 引用类块用次要色 */
     dim: Boolean = false,
-    /** 段落开头做首行缩进（样式与 [displayText] 必须一致，否则分页与渲染对不上） */
-    indentFirstLine: Boolean = false,
+    /** 段落开头做首行缩进，值 = 缩进量（sp，按正文字号算）；0 = 不缩进。须与 [displayText] 一致 */
+    indentFirstLine: Float = 0f,
     theme: ReadingTheme,
     onWordClick: (String, String) -> Unit,
     onLongPressSentence: (String) -> Unit,
@@ -718,9 +740,9 @@ private fun WordText(
             if (last < text.length) append(text.substring(last))
         }
         // 首行缩进：与测量侧 displayText 同源（只挂段落样式、不增删字符，查词 offset 不受影响）
-        if (indentFirstLine) {
+        if (indentFirstLine > 0f) {
             buildAnnotatedString {
-                withStyle(ParagraphStyle(textIndent = TextIndent(firstLine = INDENT_CHARS.em))) {
+                withStyle(ParagraphStyle(textIndent = TextIndent(firstLine = indentFirstLine.sp))) {
                     append(plain)
                 }
             }
@@ -814,14 +836,15 @@ private const val IMAGE_MAX_PAGE_RATIO = 0.62f
 /**
  * 正文块层级：来自 HTML 的 `h1/h2/h3/h4~h6/blockquote/普通段落`。
  *
- * 拍平成纯文本时这些层级会丢失（全文一个字号）；带上标记后按 [scale] 放大/缩小，
- * 与纸质书、官方阅读器的观感一致（标题大而粗、正文常规、栏目/引用次要色）。
+ * 拍平成纯文本时这些层级会丢失（全文一个字号）；带上标记后按 [scale] 放大/缩小。
+ * 观感对齐杂志式版式：**标题只放大、不加粗**（加粗后笔画很重，与正文反差过大），
+ * 导语（h3）与正文同号、靠段前留白区分，栏目 / 引用用次要色。
  */
 private enum class BlockKind(val scale: Float, val bold: Boolean, val dim: Boolean = false) {
-    TITLE(1.55f, true),          // h1
-    SUBTITLE(1.25f, true),       // h2
-    SECTION(1.10f, true),        // h3
-    MINOR(1.00f, true, dim = true), // h4~h6
+    TITLE(1.30f, false),         // h1
+    SUBTITLE(1.15f, false),      // h2
+    SECTION(1.00f, false),       // h3（导语：与正文同号）
+    MINOR(1.00f, false, dim = true), // h4~h6
     QUOTE(0.96f, false, dim = true), // blockquote
     BODY(1f, false)
 }
@@ -916,30 +939,37 @@ private fun blockStyle(kind: BlockKind, fontSize: Float, lineHeight: Float, them
         color = if (kind.dim) theme.secondaryText else theme.text
     )
 
-/** 首行缩进的字符数（2 = 中文书籍习惯）。改动会改变每段行数 → 分页随之变化，属正常 */
+/**
+ * 首行缩进的字符数（2 = 中文书籍习惯）。**标题类也缩进**：杂志版式里栏目行 / 标题 / 导语
+ * 的首行与正文首行对齐（都在缩进位），只有续行才顶格。
+ */
 private const val INDENT_CHARS = 2f
 
 /**
- * 段间距（相对行高的倍数）：段落之间空一行，与「整段一个 Text + `\n\n`」时期观感一致。
- * 0 = 段间不额外留白（会像 v1.6.0 之前那样贴在一起）。
+ * 块与块之间要不要留一行空行：[prev] 是标题（h1/h2）时才留 —— 即**标题下面空一行**，
+ * 其余情况（正文段落之间、栏目行与标题之间、导语与插图之间…）一律紧接。
+ *
+ * 栏目索引页「The world this week → • Politics」也走这条（用户 2026-09-26 确认**保留**空行），
+ * 与文章页「栏目行 → 标题 → 导语」的间隔一致。
  */
-private const val PARA_GAP_RATIO = 1f
+private fun gapAfter(prev: BlockKind?): Boolean =
+    prev == BlockKind.TITLE || prev == BlockKind.SUBTITLE
 
-/** 正文 / 引文首行缩进；标题与列表项（"• "、"- "、"1. "）不缩进更自然 */
-private fun needsIndent(kind: BlockKind, text: String): Boolean {
-    if (kind != BlockKind.BODY && kind != BlockKind.QUOTE) return false
-    val t = text.trimStart()
-    return !(t.startsWith("•") || t.startsWith("·") || t.startsWith("- ") || t.startsWith("* "))
-}
+/**
+ * 首行缩进：**一律缩进**（含列表项 "• " / "- " / "1. "）——标题 / 栏目行 / 正文 / 列表项
+ * 左边缘都落在缩进位，只有续行顶格。用户 2026-09-26：「内容要对齐」。
+ */
+@Suppress("UNUSED_PARAMETER")
+private fun needsIndent(text: String): Boolean = true
 
 /**
  * 带首行缩进的显示文本（**测量与渲染共用**）。
  * 只挂段落样式、不增删字符，因此查词用的字符 offset 不受影响。
  */
-private fun displayText(text: String, kind: BlockKind): AnnotatedString =
-    if (needsIndent(kind, text)) {
+private fun displayText(text: String, indentSp: Float): AnnotatedString =
+    if (needsIndent(text)) {
         buildAnnotatedString {
-            withStyle(ParagraphStyle(textIndent = TextIndent(firstLine = INDENT_CHARS.em))) {
+            withStyle(ParagraphStyle(textIndent = TextIndent(firstLine = indentSp.sp))) {
                 append(text)
             }
         }
@@ -976,7 +1006,6 @@ private data class ReaderPage(val blocks: List<PageBlock>)
  * @param blocksPerSeg 先按 [BookParser.IMG_MARK] 切段、再各自解析成的块序列；段 i 之后是第 i 张图
  * @param layouts      各文字块的排版结果，key = [layoutKey]
  * @param imageHeights 各图在正文宽度下的高度（px）
- * @param gapPx        段间距（px）：段与段之间空一行，与渲染侧的 Spacer 同源，缺一不可
  */
 private fun paginateFlow(
     blocksPerSeg: List<List<TextBlock>>,
@@ -984,12 +1013,13 @@ private fun paginateFlow(
     layouts: Map<Long, TextLayoutResult>,
     imageHeights: Map<Int, Float>,
     pageHeight: Float,
-    lineHeight: Float,
-    gapPx: Float
+    lineHeight: Float
 ): List<ReaderPage> {
     val pages = ArrayList<ReaderPage>()
     var blocks = ArrayList<PageBlock>()
     var used = 0f
+    /** 上一个文字块的层级：决定当前块前面要不要空一行（只有标题下面空） */
+    var prevKind: BlockKind? = null
 
     fun flush() {
         if (blocks.isNotEmpty()) {
@@ -1010,11 +1040,12 @@ private fun paginateFlow(
             var startLine = 0
             var gapApplied = false
             while (startLine < lr.lineCount) {
-                // 段首留段间距：本页已有内容才留（页首不留，否则页面顶部凭空空一行）
+                // 标题下面空一行：本页已有内容才留，页首不留（否则页面顶部凭空空一行）
                 if (startLine == 0 && !gapApplied) {
                     gapApplied = true
-                    if (blocks.isNotEmpty() && gapPx > 0f) {
-                        if (used + gapPx <= pageHeight) used += gapPx else flush()
+                    val gap = if (gapAfter(prevKind)) lineHeight else 0f
+                    if (blocks.isNotEmpty() && gap > 0f) {
+                        if (used + gap <= pageHeight) used += gap else flush()
                     }
                 }
                 var room = (pageHeight - used) / blockLine
@@ -1040,6 +1071,7 @@ private fun paginateFlow(
                 startLine = endLine
                 if (startLine < lr.lineCount) flush()
             }
+            prevKind = tb.kind
         }
 
         // 段 si 后面的那张图：跟着文字一起排，装不下才换页
@@ -1050,10 +1082,18 @@ private fun paginateFlow(
             flush()
             pages.add(ReaderPage(listOf(PageBlock.Image(img, pageHeight))))
         } else {
+            // 标题下面紧跟插图（栏目页「Politics」标题 → 首图）也要空一行：与文字侧同源，
+            // 本页已有内容才留（页首不留，否则页顶凭空空一行）
+            if (gapAfter(prevKind) && blocks.isNotEmpty()) {
+                if (used + lineHeight <= pageHeight) used += lineHeight else flush()
+            }
             if (used + h > pageHeight) flush()
             blocks.add(PageBlock.Image(img, h))
             used += h
         }
+        // 插图不是标题：图后面的文字块不再享受「标题下面空一行」
+        // （渲染侧同样只认「前一块是文字标题」，两边判断必须一致）
+        prevKind = null
     }
     flush()
     return pages.ifEmpty { listOf(ReaderPage(listOf(PageBlock.Text("")))) }
@@ -1081,6 +1121,8 @@ private fun PagedReader(
     initialPage: Int,
     /** 跨设备同步来的章内百分比（0~1，<0 表示不可用）；页码无效时按它定位 */
     initialPercent: Float,
+    /** 进入本章时直接定位到最后一页（从上一章章首往回滑进来的情况） */
+    initialAtEnd: Boolean,
     theme: ReadingTheme,
     enabledLevels: Set<String>,
     levels: LevelDictionary,
@@ -1092,11 +1134,11 @@ private fun PagedReader(
     lineHeight: Float,
     onPagesReady: (List<ReaderPage>) -> Unit,
     onPageChanged: (Int) -> Unit,
-    onPullDown: () -> Unit,
-    hasPrevChapter: Boolean,
-    hasNextChapter: Boolean,
-    onPrevChapter: () -> Unit,
+    /** 章末继续左滑 → 进入下一章 */
     onNextChapter: () -> Unit,
+    /** 章首继续右滑 → 回到上一章（定位其最后一页） */
+    onPrevChapter: () -> Unit,
+    onPullDown: () -> Unit,
     onWordClick: (String, String) -> Unit,
     onLongPressSentence: (String) -> Unit,
     /** 点击书内超链接（目录页 / 栏目页）→ 带上目标文件路径 */
@@ -1155,8 +1197,7 @@ private fun PagedReader(
                 layouts = segLayouts,
                 imageHeights = imageHeights,
                 pageHeight = pageHeightPx,
-                lineHeight = lineHeightPx,
-                gapPx = lineHeightPx * PARA_GAP_RATIO
+                lineHeight = lineHeightPx
             )
             if (built.isNotEmpty()) pages = built
         }
@@ -1174,7 +1215,7 @@ private fun PagedReader(
                         if (tb.text.isNotEmpty()) {
                             Text(
                                 // 用与渲染同一份「带首行缩进」的文本 + 同一份样式，否则测出的行数与实际排版对不上
-                                text = displayText(tb.text, tb.kind),
+                                text = displayText(tb.text, INDENT_CHARS * fontSize),
                                 style = blockStyle(tb.kind, fontSize, lineHeight, theme),
                                 modifier = Modifier.fillMaxWidth(),
                                 onTextLayout = { lr ->
@@ -1188,9 +1229,20 @@ private fun PagedReader(
         } else {
             var idx by remember(chapterKey) { mutableStateOf(initialPage.coerceAtLeast(0)) }
             var percentApplied by remember(chapterKey) { mutableStateOf(false) }
+            // 从上一章章首往回滑进来：等本章分页就绪后直接落在最后一页
+            var pendingEnd by remember(chapterKey) { mutableStateOf(initialAtEnd) }
+            // 首帧就渲染末页：分页是异步的，定位只能发生在分页之后，若这一帧仍按 idx(=0) 渲染，
+            // 就会先闪一下「本章开头」再跳到末尾；pendingEnd 期间直接用末页作为显示页即可避免
+            val renderIdx = if (pendingEnd) pages.lastIndex else idx
             // 分页是异步的：页数就绪后再校正定位
             LaunchedEffect(pages.size) {
                 if (pages.isEmpty()) return@LaunchedEffect
+                if (pendingEnd) {
+                    pendingEnd = false
+                    idx = pages.lastIndex
+                    onPageChanged(idx)
+                    return@LaunchedEffect
+                }
                 if (idx > pages.lastIndex) idx = 0
                 // 没有本机页码（例如进度是从别的设备同步来的）→ 用百分比换算成页码
                 if (!percentApplied && initialPage <= 0 && initialPercent in 0.01f..1f) {
@@ -1200,28 +1252,35 @@ private fun PagedReader(
                 }
             }
             LaunchedEffect(idx) {
-                onPageChanged(idx)
+                // pendingEnd 期间不上报：此时 idx 还是 0，会把「上一章末页」的页码先冲成第 1 页
+                if (!pendingEnd) onPageChanged(idx)
             }
 
             // 手势挂在 Crossfade 自身（父节点）上：子节点 WordText 的点击优先命中，
             // 父节点只在横向/纵向拖动超过阈值时才消费，因此不会挡住点词。
             Crossfade(
-                targetState = idx,
+                targetState = renderIdx,
                 modifier = Modifier
                     .fillMaxSize()
-                    .pointerInput(chapterKey, pages.size, idx, hasPrevChapter, hasNextChapter) {
+                    // key 里不放 idx：idx 一变就重建手势检测器，同一次滑动可能被判定两次（翻两页）
+                    .pointerInput(chapterKey, pages.size) {
                         var dx = 0f
+                        var lastTurn = 0L
                         detectHorizontalDragGestures(
                             onDragStart = { dx = 0f },
                             onHorizontalDrag = { _, d -> dx += d },
                             onDragEnd = {
-                                // 章内翻页；到章节首/尾时继续滑动则切章
+                                // 一次滑动只翻一页：300ms 内的重复上报直接忽略
+                                val now = android.os.SystemClock.elapsedRealtime()
+                                if (now - lastTurn < 300L) return@detectHorizontalDragGestures
+                                // 像翻书一样跨章节连续阅读：一次滑动只前进/后退一页；
+                                // 章末左滑 → 下一章第 1 页，章首右滑 → 上一章最后一页
                                 if (dx < -60f) {
-                                    if (idx < pages.size - 1) idx++
-                                    else if (hasNextChapter) onNextChapter()
+                                    lastTurn = now
+                                    if (idx < pages.size - 1) idx++ else onNextChapter()
                                 } else if (dx > 60f) {
-                                    if (idx > 0) idx--
-                                    else if (hasPrevChapter) onPrevChapter()
+                                    lastTurn = now
+                                    if (idx > 0) idx-- else onPrevChapter()
                                 }
                             }
                         )
@@ -1243,12 +1302,19 @@ private fun PagedReader(
                         .fillMaxSize()
                         .padding(horizontal = 18.dp, vertical = 12.dp)
                 ) {
-                    // 段间距（px → dp，与 paginateFlow 里累加的 gapPx 同源）
-                    val gapDp = with(density) { (lineHeightPx * PARA_GAP_RATIO).toDp() }
                     page.blocks.forEachIndexed { index, block ->
-                        // 段间距：本页第一块不加（页面顶部留白会显得空）
-                        if (index > 0 && block is PageBlock.Text && block.startsParagraph) {
-                            Spacer(Modifier.height(gapDp))
+                        // 标题下面空一行（与 paginateFlow 里累加的 gap 同源）：本页第一块不留
+                        val prevBlock = page.blocks.getOrNull(index - 1)
+                        val prevIsTitle = (prevBlock as? PageBlock.Text)?.let {
+                            gapAfter(it.kind)
+                        } ?: false
+                        // 标题下面是文字段（段落开头）**或插图**都空一行：栏目页「Politics」标题
+                        // 下面紧跟首图，以前只判断文字块 → 空行跑到插图后面的日期行前面去了
+                        if (index > 0 && prevIsTitle &&
+                            (block is PageBlock.Image ||
+                                (block is PageBlock.Text && block.startsParagraph))
+                        ) {
+                            Spacer(Modifier.height(with(density) { lineHeightPx.toDp() }))
                         }
                         when (block) {
                             is PageBlock.Text -> {
@@ -1261,6 +1327,11 @@ private fun PagedReader(
                                         fontSize = fontSize,
                                         lineHeight = lineHeight,
                                         theme = theme,
+                                        // 与 WordText / displayText 同源：链接行（栏目索引的 • Politics…）
+                                        // 也要首行缩进，否则测量缩进、渲染不缩 → 换行位置对不上
+                                        indentFirstLine = if (block.startsParagraph &&
+                                            needsIndent(block.text)
+                                        ) INDENT_CHARS * fontSize else 0f,
                                         onClick = { onInternalLink(target) }
                                     )
                                 } else {
@@ -1280,9 +1351,11 @@ private fun PagedReader(
                                         theme = theme,
                                         onWordClick = onWordClick,
                                         onLongPressSentence = onLongPressSentence,
-                                        // 首行缩进：只缩「段落开头那一片」的正文（与测量侧同源）
-                                        indentFirstLine = block.startsParagraph &&
-                                            needsIndent(block.kind, block.text),
+                                        // 首行缩进：只缩「段落开头那一片」；量按**正文字号**算，
+                                        // 这样标题与栏目行缩进同一个位置（与测量侧同源）
+                                        indentFirstLine = if (block.startsParagraph &&
+                                            needsIndent(block.text)
+                                        ) INDENT_CHARS * fontSize else 0f,
                                         modifier = Modifier.fillMaxWidth()
                                     )
                                 }
@@ -1313,10 +1386,21 @@ private fun LinkLine(
     fontSize: Float,
     lineHeight: Float,
     theme: ReadingTheme,
+    /** 首行缩进量（sp，按正文字号算）；0 = 不缩进。与 [WordText]/[displayText] 同源 */
+    indentFirstLine: Float = 0f,
     onClick: () -> Unit
 ) {
     Text(
-        text = text,
+        // 只挂段落样式、不增删字符：与 displayText / WordText 的缩进实现保持一致
+        text = if (indentFirstLine > 0f) {
+            buildAnnotatedString {
+                withStyle(ParagraphStyle(textIndent = TextIndent(firstLine = indentFirstLine.sp))) {
+                    append(text)
+                }
+            }
+        } else {
+            AnnotatedString(text)
+        },
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick),

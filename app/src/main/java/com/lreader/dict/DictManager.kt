@@ -6,6 +6,7 @@ import android.os.Looper
 import android.util.Log
 import com.lreader.data.DownloadCenter
 import com.lreader.data.DownloadNotifier
+import com.lreader.data.DownloadSource
 import com.lreader.data.SettingsStore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -43,6 +44,8 @@ class DictManager private constructor(private val context: Context) {
         val installed: Boolean = false,
         val downloading: Boolean = false,
         val progress: Float = 0f,
+        /** 实时速度（字节/秒，滑动平均）；判断是「源慢」还是「卡住」 */
+        val speed: Long = 0L,
         val error: String? = null
     )
 
@@ -185,46 +188,32 @@ class DictManager private constructor(private val context: Context) {
         val part = File(context.filesDir, res.fileName + PART_SUFFIX)
         val title = "正在下载 ${res.name}"
 
-        setState(res.id) { it.copy(downloading = true, progress = 0f, error = null) }
+        setState(res.id) { it.copy(downloading = true, progress = 0f, speed = 0L, error = null) }
         // 状态栏进度通知 + 登记取消入口（通知里的「取消」按钮经 DownloadCancelReceiver 找回来）
         DownloadNotifier.start(context, res.id, title)
         DownloadCenter.register(res.id) { cancel(res) }
 
         val job = scope.launch {
             try {
-                val url = urlOf(res)
-                Log.i(TAG, "开始下载 ${res.name}：$url")
-                val request = Request.Builder().url(url).build()
-                http.newCall(request).execute().use { resp ->
-                    if (!resp.isSuccessful) {
-                        throw IOException("HTTP ${resp.code}")
-                    }
-                    val body = resp.body ?: throw IOException("响应内容为空")
-                    val total = body.contentLength().takeIf { it > 0 } ?: res.sizeBytes
-                    body.byteStream().use { input ->
-                        FileOutputStream(part).use { out ->
-                            val buf = ByteArray(1 shl 16)
-                            var read = 0L
-                            var lastTick = 0L
-                            while (true) {
-                                val n = input.read(buf)
-                                if (n <= 0) break
-                                out.write(buf, 0, n)
-                                read += n
-                                val now = System.currentTimeMillis()
-                                if (now - lastTick >= 200) {
-                                    lastTick = now
-                                    val p = if (total > 0) (read.toFloat() / total) else 0f
-                                    setState(res.id) { it.copy(progress = p.coerceIn(0f, 0.99f)) }
-                                    // 服务端没给 Content-Length 时保持「不确定进度」的通知，别显示假百分比
-                                    if (total > 0) DownloadNotifier.progress(context, res.id, title, p)
-                                }
-                            }
-                            out.flush()
-                            out.fd.sync()
-                        }
+                // 先给各源测速（直连 github 常被限速，镜像时快时慢），挑最快的下载，失败再依次回退
+                val ranked = DownloadSource.rank(http, urlOf(res)) { Log.i(TAG, "${res.name}：$it") }
+                var lastError: Exception? = null
+                var fetched = false
+                for (url in ranked) {
+                    try {
+                        Log.i(TAG, "开始下载 ${res.name}：$url")
+                        fetchTo(part, url, res, title)
+                        fetched = true
+                        break
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        lastError = e
+                        part.delete()
+                        Log.w(TAG, "该下载源失败，换下一个：$url", e)
                     }
                 }
+                if (!fetched) throw lastError ?: IOException("所有下载源都不可用")
 
                 val len = part.length()
                 if (res.sizeBytes > 0 && len != res.sizeBytes) {
@@ -260,6 +249,54 @@ class DictManager private constructor(private val context: Context) {
             }
         }
         jobs[res.id] = job
+    }
+
+    /**
+     * 从 [url] 拉取到 `part`，期间刷新**进度 + 实时速度**（速度是 200ms 窗口的滑动平均，
+     * 掉到 0 就说明卡住了）。失败抛异常，由调用方换下一个源重试。
+     */
+    private fun fetchTo(part: File, url: String, res: DictResource, title: String) {
+        val request = Request.Builder().url(url).header("User-Agent", "LingReader").build()
+        http.newCall(request).execute().use { resp ->
+            if (!resp.isSuccessful) throw IOException("HTTP ${resp.code}")
+            val body = resp.body ?: throw IOException("响应内容为空")
+            val total = body.contentLength().takeIf { it > 0 } ?: res.sizeBytes
+            body.byteStream().use { input ->
+                FileOutputStream(part).use { out ->
+                    val buf = ByteArray(1 shl 16)
+                    var read = 0L
+                    var lastTick = 0L
+                    var speedTick = System.currentTimeMillis()
+                    var speedRead = 0L
+                    var speed = 0L
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n <= 0) break
+                        out.write(buf, 0, n)
+                        read += n
+                        val now = System.currentTimeMillis()
+                        if (now - lastTick >= 200) {
+                            lastTick = now
+                            val dt = now - speedTick
+                            if (dt >= 200) {
+                                val instant = (read - speedRead) * 1000 / dt
+                                speed = if (speed <= 0L) instant else (speed * 3 + instant) / 4
+                                speedTick = now
+                                speedRead = read
+                            }
+                            val p = if (total > 0) (read.toFloat() / total) else 0f
+                            setState(res.id) {
+                                it.copy(progress = p.coerceIn(0f, 0.99f), speed = speed)
+                            }
+                            // 服务端没给 Content-Length 时保持「不确定进度」的通知，别显示假百分比
+                            if (total > 0) DownloadNotifier.progress(context, res.id, title, p, speed)
+                        }
+                    }
+                    out.flush()
+                    out.fd.sync()
+                }
+            }
+        }
     }
 
     /** 取消下载（已下载的部分会被丢弃） */

@@ -49,12 +49,17 @@ object DownloadNotifier {
         notify(context, id, builder(context, id, title, "正在下载…", progress = null, ongoing = true).build())
     }
 
-    /** 进度更新，[progress] 为 0~1 */
-    fun progress(context: Context, id: String, title: String, progress: Float) {
+    /**
+     * 进度更新，[progress] 为 0~1；
+     * [speedBytes]（字节/秒）非 0 时一并显示，方便判断是「源慢」还是「卡住了」。
+     */
+    fun progress(context: Context, id: String, title: String, progress: Float, speedBytes: Long = 0L) {
         val pct = (progress * 100).toInt().coerceIn(0, 99)
+        val speed = DownloadSource.speedText(speedBytes)
+        val text = if (speed.isEmpty()) "已下载 $pct%" else "已下载 $pct% · $speed"
         notify(
             context, id,
-            builder(context, id, title, "已下载 $pct%", progress = progress, ongoing = true).build()
+            builder(context, id, title, text, progress = progress, ongoing = true).build()
         )
     }
 

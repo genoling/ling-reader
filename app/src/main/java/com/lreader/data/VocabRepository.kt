@@ -103,7 +103,7 @@ class VocabRepository(context: Context) {
          * 4：新增同步元数据 `uid` / `updated_at` / `deleted`（升级后自动回填 UUID）。
          * 一律靠 ensureSchema 非破坏性补列。
          */
-        private const val DB_VERSION = 4
+        private const val DB_VERSION = 5
 
         /**
          * 表结构唯一来源。新增字段直接追加，升级会自动补列。
@@ -111,6 +111,14 @@ class VocabRepository(context: Context) {
          */
         private val COLUMNS = listOf(
             "word TEXT NOT NULL",
+            /**
+             * 正文里实际出现的**词形**（如 `walked`、`houses`），逗号分隔可存多个。
+             *
+             * `word` 存的是词典原形（lemma，`walked → walk`），但正文高亮与「是否已收藏」
+             * 的判断都用正文里的原样词，两者不一致就会出现「加了不标红、再点显示已收藏」
+             * （v1.6.2 修）。老数据的这一列为空 → [highlightWords] 回退到按原形匹配。
+             */
+            "form TEXT",
             "meaning TEXT",
             "phonetic TEXT",
             "sentence TEXT",
@@ -151,11 +159,21 @@ class VocabRepository(context: Context) {
         return null
     }
 
-    /** 添加生词，已存在则不重复添加 */
-    fun add(w: VocabWord): Boolean {
-        if (contains(w.word)) return false
+    /**
+     * 添加生词。
+     *
+     * @param form 正文里**实际点到的词形**（`walked`）；`word` 是词典原形（`walk`）。
+     *   两者不同时必须记住词形，否则正文按 `walked` 标红会匹配不上，再点也会显示「已收藏」。
+     * @return true = 新增；false = 已存在（此时仍会把这次的词形补记进去）
+     */
+    fun add(w: VocabWord, form: String = ""): Boolean {
+        if (contains(w.word)) {
+            rememberForm(w.word, form)
+            return false
+        }
         val cv = ContentValues().apply {
             put("word", w.word)
+            put("form", cleanForm(form, w.word))
             put("meaning", w.meaning)
             put("phonetic", w.phonetic)
             put("sentence", w.sentence)
@@ -173,6 +191,52 @@ class VocabRepository(context: Context) {
             put("deleted", 0)
         }
         return helper.writableDatabase.insert("vocab", null, cv) > 0
+    }
+
+    /** 词形规范化：小写、去空白；与原形相同则不存（省一列冗余） */
+    private fun cleanForm(form: String, word: String): String? =
+        form.trim().lowercase().takeIf { it.isNotEmpty() && it != word.trim().lowercase() }
+
+    /**
+     * 把正文里遇到的词形补记到已收藏的词条上。
+     *
+     * `walk` 已收藏后再点 `walking`，[add] 会因「已存在」返回 false；这里把 `walking`
+     * 追加到 `form` 列，两个变形在正文里就都能标红（否则只有第一次点到的那个会红）。
+     */
+    fun rememberForm(word: String, form: String) {
+        val f = cleanForm(form, word) ?: return
+        val id = findId(word) ?: return
+        val db = helper.writableDatabase
+        db.rawQuery("SELECT form FROM vocab WHERE id = ?", arrayOf(id.toString())).use { c ->
+            if (!c.moveToFirst()) return
+            val forms = c.getString(0).orEmpty()
+                .split(',').map { it.trim() }.filter { it.isNotEmpty() }.toMutableSet()
+            if (!forms.add(f)) return
+            db.execSQL(
+                "UPDATE vocab SET form = ?, updated_at = ? WHERE id = ?",
+                arrayOf(forms.joinToString(","), System.currentTimeMillis(), id)
+            )
+        }
+    }
+
+    /**
+     * 正文高亮用的词集合：**原形 + 所有记录过的词形**（全小写）。
+     *
+     * 只按原形匹配时，正文里的 `walked`（词典原形 `walk`）永远标不红 —— 这是
+     * 「有些词加不进生词、颜色也不变红」的根因（v1.6.2 修）。
+     */
+    fun highlightWords(): Set<String> {
+        val out = HashSet<String>()
+        helper.readableDatabase
+            .rawQuery("SELECT word, form FROM vocab WHERE deleted = 0", null).use { c ->
+                while (c.moveToNext()) {
+                    c.getString(0)?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }?.let(out::add)
+                    c.getString(1)?.split(',')?.forEach { f ->
+                        f.trim().lowercase().takeIf { it.isNotEmpty() }?.let(out::add)
+                    }
+                }
+            }
+        return out
     }
 
     /**

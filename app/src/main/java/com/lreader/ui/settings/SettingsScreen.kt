@@ -32,6 +32,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import com.lreader.data.DownloadSource
 import com.lreader.data.ReleaseInfo
 import com.lreader.data.SettingsStore
 import com.lreader.data.UpdateRepository
@@ -157,6 +158,7 @@ fun SettingsScreen(onOpenAdmin: () -> Unit = {}) {
     var updateChecked by remember { mutableStateOf(false) }
     var downloading by remember { mutableStateOf(false) }
     var downloadProgress by remember { mutableStateOf(0f) }
+    var downloadSpeed by remember { mutableStateOf(0L) }
 
     // Android 13+ 的状态栏下载进度通知需要运行时权限：未授权时先申请再下载
     var pendingDownload by remember { mutableStateOf<(() -> Unit)?>(null) }
@@ -203,8 +205,12 @@ fun SettingsScreen(onOpenAdmin: () -> Unit = {}) {
             scope.launch {
                 downloading = true
                 downloadProgress = 0f
+                downloadSpeed = 0L
                 updateError = null
-                val file = updater.download(info) { downloadProgress = it }
+                val file = updater.download(info) { p, speed ->
+                    downloadProgress = p
+                    downloadSpeed = speed
+                }
                 downloading = false
                 if (file == null) {
                     updateError = if (updater.wasCancelled()) "已取消下载" else "下载失败，请换网络后重试"
@@ -807,7 +813,11 @@ fun SettingsScreen(onOpenAdmin: () -> Unit = {}) {
                         }
 
                         downloading -> Column {
-                            Text("正在下载…", fontSize = 12.sp)
+                            Text(
+                                "正在下载…" + DownloadSource.speedText(downloadSpeed)
+                                    .let { if (it.isEmpty()) "" else " $it" },
+                                fontSize = 12.sp
+                            )
                             Spacer(Modifier.height(6.dp))
                             LinearProgressIndicator(
                                 progress = downloadProgress,
@@ -989,7 +999,9 @@ private fun TtsEngineRow(
                 )
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        "下载中 ${(status.progress * 100).toInt()}% / ${DictCatalog.formatSize(res.sizeBytes)}",
+                        "下载中 ${(status.progress * 100).toInt()}% / ${DictCatalog.formatSize(res.sizeBytes)}" +
+                            DownloadSource.speedText(status.speed)
+                                .let { if (it.isEmpty()) "" else " · $it" },
                         fontSize = 11.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -1385,7 +1397,9 @@ private fun DictResourceRow(
                 Spacer(Modifier.height(4.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        "下载中 ${(status.progress * 100).toInt()}%（请勿退出 App）",
+                        "下载中 ${(status.progress * 100).toInt()}%（请勿退出 App）" +
+                            DownloadSource.speedText(status.speed)
+                                .let { if (it.isEmpty()) "" else " · $it" },
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.weight(1f)

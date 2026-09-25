@@ -159,10 +159,10 @@ class UpdateRepository(private val context: Context) {
 
     /**
      * 下载最新版安装包到 `cacheDir`（**校验通过才落到正式文件名**）。
-     * @param onProgress 0~1，**主线程**回调
+     * @param onProgress (0~1 进度, 字节/秒)，**主线程**回调
      * @return 成功=已校验的 APK 文件；null=失败或被取消（见 [wasCancelled]）
      */
-    suspend fun download(info: ReleaseInfo, onProgress: (Float) -> Unit): File? =
+    suspend fun download(info: ReleaseInfo, onProgress: (Float, Long) -> Unit): File? =
         withContext(Dispatchers.IO) {
             if (info.apkUrl.isBlank()) return@withContext null
             cancelled = false
@@ -173,7 +173,8 @@ class UpdateRepository(private val context: Context) {
             DownloadCenter.register(DOWNLOAD_ID) { cancelDownload() }
             var reason: String? = null
             try {
-                val urls = listOf(info.apkUrl, "https://ghproxy.net/" + info.apkUrl)
+                // 先给各源（直连 + 镜像）测速，挑最快的下载，失败再依次回退
+                val urls = DownloadSource.rank(http, info.apkUrl)
                 for (url in urls) {
                     if (cancelled) break
                     var ok = false
@@ -190,6 +191,9 @@ class UpdateRepository(private val context: Context) {
                                     val buf = ByteArray(1 shl 16)
                                     var read = 0L
                                     var last = 0L
+                                    var speedTick = System.currentTimeMillis()
+                                    var speedRead = 0L
+                                    var speed = 0L
                                     while (true) {
                                         // 用户点了取消就立刻停：连接阶段（activeCall 还没建立）也能中断，
                                         // 已建立连接时则由 Call.cancel() 提前抛出
@@ -201,10 +205,17 @@ class UpdateRepository(private val context: Context) {
                                         val now = System.currentTimeMillis()
                                         if (now - last >= 200) {
                                             last = now
+                                            val dt = now - speedTick
+                                            if (dt >= 200) {
+                                                val instant = (read - speedRead) * 1000 / dt
+                                                speed = if (speed <= 0L) instant else (speed * 3 + instant) / 4
+                                                speedTick = now
+                                                speedRead = read
+                                            }
                                             if (total > 0) {
                                                 val p = (read.toFloat() / total).coerceIn(0f, 0.99f)
-                                                main.post { onProgress(p) }
-                                                DownloadNotifier.progress(context, DOWNLOAD_ID, title, p)
+                                                main.post { onProgress(p, speed) }
+                                                DownloadNotifier.progress(context, DOWNLOAD_ID, title, p, speed)
                                             }
                                         }
                                     }
@@ -239,7 +250,7 @@ class UpdateRepository(private val context: Context) {
 
                     if (target.exists()) target.delete()
                     if (tmp.renameTo(target)) {
-                        main.post { onProgress(1f) }
+                        main.post { onProgress(1f, 0L) }
                         DownloadNotifier.finish(context, DOWNLOAD_ID, title, "下载完成，正在打开安装界面")
                         return@withContext target
                     }

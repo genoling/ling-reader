@@ -14,7 +14,7 @@ LingReader 的目录组织、模块职责与关键数据流。
 | AGP / Gradle / Kotlin | 8.1.4 / 8.9 / 1.8.10 |
 | Compose | Compose 1.4.3 + Compiler 1.4.3 + material3 1.1.2 |
 | 构建产物 | debug `app-debug.apk` ≈ 20.4 MB ／ release `app-release.apk` ≈ 14.5 MB（正式签名） |
-| 当前版本 | **v1.6.1**（`versionCode` = 19、`versionName` = `1.6.1`） |
+| 当前版本 | **v1.6.2**（`versionCode` = 20、`versionName` = `1.6.2`） |
 
 ### 设计原则
 
@@ -302,13 +302,11 @@ bookId 用 `URLEncoder/URLDecoder` 编解码（因为它可能是文件路径）
   （`MARK_TITLE`…`MARK_QUOTE`），阅读页 `parseBlocks()` 还原成 `TextBlock(text, BlockKind)`，
   按 `BlockKind.scale/bold/dim` 渲染（标题 1.55x/1.25x/1.10x 加粗、栏目与引用用次要色）；
   测量与渲染共用 `blockStyle()`，否则分页行数会对不上
-- **段间距与首行缩进**：正文 / 引文首行缩进 `INDENT_CHARS`（2 字符），段与段之间空 `PARA_GAP_RATIO`（1 行）。
-  两者都会改变每段行数，故测量与渲染必须同源：缩进走 `displayText()`（只挂
-  `ParagraphStyle(TextIndent)`，不增删字符，查词 offset 不受影响），段间距由 `paginateFlow(gapPx)`
-  计入页高、渲染侧用 `Spacer` 还原；`PageBlock.Text.startsParagraph` 标记「这一片是段落开头」，
-  跨页续排片为 `false`（不重复缩进，页首也不多留白）
-  - `parseBlocks()` 按空行切段，**必须忽略 `\r`**：CRLF 文本里 `buf` 末尾永远是 `\r`，
-    「连续两个 `\n`」判定不会成立，整章会挤成一个块（缩进与段间距只剩第 1 页有）
+- **首行缩进**：正文 / 引文段首缩进 `INDENT_CHARS`（2 字符），只挂 `ParagraphStyle(TextIndent)`、
+  不增删字符（点词查词的 offset 不受影响）；测量侧 `displayText()` 与渲染侧 `WordText(indentFirstLine=…)`
+  必须同源，否则分页行数与实际排版对不上。**段落之间不加额外留白**（v1.6.1 曾用 `PARA_GAP_RATIO`
+  在每个块之间硬留一行，v1.6.2 已去掉：那样会把栏目行 / 标题 / 导语上下都拉开，一页行数变少）。
+  另：Compose `Text` 没有两端对齐与自动断词（`hav-ing` 那种），参考图那种排法需要 WebView 排版。
 - **书内链接与列表**：`htmlToText` 把 `<li>` 转成「换行 + `• `」、把 `<a href>` 转成
   `MARK_LINK 目标路径 MARK_LINK_TEXT 文字 MARK_LINK_END`；阅读页将「整块内容就是链接」的块渲染为
   `LinkLine`（主色 + 下划线，点击 → `onInternalLink(路径)` → `chapters.indexOfFirst { it.sourcePath == 路径 }` 跳章），
