@@ -13,8 +13,8 @@ LingReader 的目录组织、模块职责与关键数据流。
 | minSdk / targetSdk / compileSdk | 24 / 33 / 33 |
 | AGP / Gradle / Kotlin | 8.1.4 / 8.9 / 1.8.10 |
 | Compose | Compose 1.4.3 + Compiler 1.4.3 + material3 1.1.2 |
-| 构建产物 | `app/build/outputs/apk/debug/app-debug.apk`（实测 20171695 B ≈ 19.2 MB，词典改为按需下载后） |
-| 当前版本 | **v1.1.0**（`versionCode` = 11、`versionName` = `1.1.0`） |
+| 构建产物 | debug `app-debug.apk` ≈ 20.4 MB ／ release `app-release.apk` ≈ 14.5 MB（正式签名） |
+| 当前版本 | **v1.6.1**（`versionCode` = 19、`versionName` = `1.6.1`） |
 
 ### 设计原则
 
@@ -91,7 +91,12 @@ ling-reader/                       # ★ Android 工程根目录（GitHub 仓库
             ├── data/
             │   ├── BookRepository.kt      # 书架（JSON 持久化）
             │   ├── VocabRepository.kt     # 生词本（SQLite + SM-2）
-            │   └── SettingsStore.kt       # 设置（JSON 持久化）
+            │   ├── SettingsStore.kt       # 设置（JSON 持久化）
+            │   ├── UpdateRepository.kt    # 检查更新 + 下载安装包（校验后才落盘，可取消）
+            │   ├── DownloadNotifier.kt    # ★ 状态栏下载进度通知（含「取消」按钮）
+            │   ├── DownloadCenter.kt      # 正在下载的任务登记：通知的取消按钮按 id 找回「怎么取消我」
+            │   ├── DownloadCancelReceiver.kt  # 通知取消按钮的广播落点（静态注册，后台也能收到）
+            │   └── DownloadCleaner.kt     # 启动时清掉没下完的 .part 临时文件
             │
             ├── book/
             │   └── BookParser.kt          # TXT/EPUB/FB2/HTML 解析
@@ -148,6 +153,18 @@ ling-reader/                       # ★ Android 工程根目录（GitHub 仓库
 - `download()`：OkHttp 流式下载 + 200ms 节流进度 + 可取消 + **双重校验**（字节数 + `SQLite format 3` 文件头）+ rename 落盘。
 - `remove()` 仅对 `removable` 资源生效（分级词库内置，删掉会让高亮永久失效，故禁止删除）。
 - 网络明文 HTTP（镜像 / 局域网源）由 `res/xml/network_security_config.xml` 放行。
+
+**下载的公共约定**（词典 / 语音引擎 / 应用更新三处一致，v1.6.1 起）：
+- **状态栏通知**：`DownloadNotifier` 发进度通知（`channel=downloads`，含「取消」按钮）；取消按钮是
+  `DownloadCancelReceiver` 的广播，经 `DownloadCenter`（id → 取消回调）找到对应任务。Android 13+
+  需 `POST_NOTIFICATIONS` 运行时权限，**未授权只是看不到通知，下载照常**。
+- **先 `.part` 再校验才 rename**：正式文件名一旦出现就代表「完整可用」；半包 / 被劫持（字节数不符、
+  非 `SQLite format 3` / 非 `PK` 头）直接丢弃并换镜像重试。
+- **残留清理**：进程被杀 / 崩溃来不及删的 `.part`，由 `DownloadCleaner.cleanStaleParts()` 在
+  `LRreaderApp.onCreate()` 里清掉（此时不可能有正在进行的下载）。
+- **更新包走 `cacheDir`**：交给系统安装器时靠 FileProvider，`res/xml/file_paths.xml` 必须同时放行
+  `files-path`（语音引擎用）与 `cache-path`（更新包用），否则 `getUriForFile` 报
+  `Failed to find configured root`（v1.6.1 修复的正是这一条）。
 
 **`dict/DictDatabase.kt`** — 主词典（下载后位于 `filesDir/dict_en_zh.db`）
 - `ensureReady()`：**不再拷贝 assets、不联网**，只打开本地文件；文件缺失或被外部删除时返回 false 并释放旧句柄
@@ -285,6 +302,13 @@ bookId 用 `URLEncoder/URLDecoder` 编解码（因为它可能是文件路径）
   （`MARK_TITLE`…`MARK_QUOTE`），阅读页 `parseBlocks()` 还原成 `TextBlock(text, BlockKind)`，
   按 `BlockKind.scale/bold/dim` 渲染（标题 1.55x/1.25x/1.10x 加粗、栏目与引用用次要色）；
   测量与渲染共用 `blockStyle()`，否则分页行数会对不上
+- **段间距与首行缩进**：正文 / 引文首行缩进 `INDENT_CHARS`（2 字符），段与段之间空 `PARA_GAP_RATIO`（1 行）。
+  两者都会改变每段行数，故测量与渲染必须同源：缩进走 `displayText()`（只挂
+  `ParagraphStyle(TextIndent)`，不增删字符，查词 offset 不受影响），段间距由 `paginateFlow(gapPx)`
+  计入页高、渲染侧用 `Spacer` 还原；`PageBlock.Text.startsParagraph` 标记「这一片是段落开头」，
+  跨页续排片为 `false`（不重复缩进，页首也不多留白）
+  - `parseBlocks()` 按空行切段，**必须忽略 `\r`**：CRLF 文本里 `buf` 末尾永远是 `\r`，
+    「连续两个 `\n`」判定不会成立，整章会挤成一个块（缩进与段间距只剩第 1 页有）
 - **书内链接与列表**：`htmlToText` 把 `<li>` 转成「换行 + `• `」、把 `<a href>` 转成
   `MARK_LINK 目标路径 MARK_LINK_TEXT 文字 MARK_LINK_END`；阅读页将「整块内容就是链接」的块渲染为
   `LinkLine`（主色 + 下划线，点击 → `onInternalLink(路径)` → `chapters.indexOfFirst { it.sourcePath == 路径 }` 跳章），

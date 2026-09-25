@@ -8,6 +8,11 @@
       且系统仍会弹「是否允许来自此来源的应用」由用户确认 —— App 无法静默安装。
     -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!--
+      下载进度通知（词典 / 语音引擎 / 应用更新）：Android 13+ 需要运行时授权，
+      未授权也能下载，只是状态栏里看不到进度（见 DownloadNotifier）。
+    -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!--
       Android 11 (API 30) 起有「包可见性」限制：
@@ -55,6 +60,11 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+
+        <!-- 状态栏下载通知里「取消」按钮的落点（静态注册，App 在后台也能收到） -->
+        <receiver
+            android:name=".data.DownloadCancelReceiver"
+            android:exported="false" />
     </application>
 
 </manifest>

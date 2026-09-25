@@ -3,6 +3,48 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与 [语义化版本](https://semver.org/lang/zh-CN/)。
 版本号对应 `app/build.gradle.kts` 中的 `versionName` / `versionCode`。
 
+## [1.6.1] - 2026-09-25
+
+**修复「下载并安装」失败；下载变成「看得见、能取消、不留垃圾」。**
+
+**修复**
+- **更新安装失败**：点「下载并安装」报 `Failed to find configured root that contains
+  /data/data/com.lreader/cache/update-x.y.z.apk` —— `FileProvider` 的 `res/xml/file_paths.xml`
+  只放行了 `filesDir`（语音引擎用），而更新包下在 `cacheDir`，`getUriForFile` 找不到对应 root。
+  补 `<cache-path name="cache" path="." />` 后安装界面正常拉起。
+- **取消更新下载无效**：请求还没建立连接（`activeCall` 尚为空）时点取消，之后仍会继续下完。
+  改为在下载循环里每轮检查一次 `cancelled` 标志，已建立连接时由 `Call.cancel()` 提前打断。
+- **正文排版恢复书籍观感**：段落之间重新空出一行，正文 / 引文的**首行缩进两个字符**。
+  分页改造把正文拆成块逐个渲染后，段间只剩行距、首行缩进也丢了，看着比旧版拥挤。
+  （`paginateFlow` 新增 `gapPx` 参与分页、渲染侧用 `Spacer` 还原；测量与渲染共用
+  `displayText()` —— 缩进会改变每段行数，两处必须同源，否则分页会与实际排版错位。）
+- **TXT 只有第 1 页有缩进 / 段间距**：Windows 下的 TXT 是 CRLF，`parseBlocks()` 判「连续两个换行」
+  时 `buf` 末尾永远是 `\r`，条件永不成立 → 整章被当成**一个块**，缩进与段间距只在第 1 片生效，
+  翻到第 2 页起就没了。改为**忽略 `\r`**后按空行正常切块（一章 33 段 = 33 个块，逐段缩进）。
+
+**新增**
+- **状态栏下载进度通知**：词典 / 语音引擎 / 应用更新下载时在状态栏显示进度，通知里可一键取消
+  （`data/DownloadNotifier.kt` 发通知、`data/DownloadCancelReceiver.kt` 接取消广播、
+  `data/DownloadCenter.kt` 把「怎么取消我」登记给通知）。Android 13+ 首次下载前申请通知权限，
+  **拒绝也照常下载**，只是看不到进度。
+- 设置页「正在下载…」右侧也加了「取消」（应用更新），不用专门去状态栏。
+- **更新包与词典一致：校验通过才落盘** —— 先写 `.part`，字节数与 Release 声明一致 + APK(ZIP) 头
+  都通过才 rename；半包 / 被劫持的文件直接删掉并换镜像重试。
+- **启动时清掉没下完的临时文件**（`data/DownloadCleaner.kt`）：进程被杀 / 崩溃后残留的 `.part`
+  会在下次启动时删除，不再白占几十 MB。
+
+**校验**
+- 模拟器实测：临时构建 v1.5.9 → 检查更新 → 发现 v1.6.0 → 「下载并安装」→ 系统「要更新此应用吗？」
+  弹窗正常出现（修复前此处报 `Failed to find configured root`）；`cacheDir` 中得到
+  15,157,360 字节的 `update-v1.6.0.apk`（与 Release 声明一致）；下载期间 `dumpsys notification`
+  可见 `channel=downloads` 的通知，且带 1 个「取消」action。
+- 排版实测（32 段长测试书 / 6 页，逐页抓原始帧量像素）：第 1~6 页**每段首行都缩进 76 px（= 2 字符）**、
+  段间距 ≈110 px（≈ 1 行，行内 63~75 px）、跨页续排行不缩进；段落序列连续无丢字
+  （1→01-06、2→07-12、…、6→31-32），页末压边界不溢出。
+- `assembleDebug` 零警告；`versionCode` 18 → **19**，`versionName` `1.6.0` → **`1.6.1`**。
+
+---
+
 ## [1.6.0] - 2026-09-25
 
 **云同步改为「一键生成」：仓库与令牌内置，不用再填任何内容。**

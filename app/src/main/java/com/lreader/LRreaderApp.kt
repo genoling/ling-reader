@@ -1,6 +1,7 @@
 package com.lreader
 
 import android.app.Application
+import com.lreader.data.DownloadCleaner
 import com.lreader.data.SettingsStore
 import com.lreader.dict.DictManager
 import com.lreader.speech.SpeechManager
@@ -19,6 +20,8 @@ class LRreaderApp : Application() {
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     override fun onCreate() {
         super.onCreate()
+        // 清掉上次没下完的临时文件（进程被杀 / 崩溃留下的 .part，可能有几十 MB）
+        DownloadCleaner.cleanStaleParts(this)
         TranslationEngines.init(this)
         // 语音引擎 APK 与词典共用同一套下载管理（进度 / 取消 / 校验 / 删除），先把清单登记进去
         DictManager.get(this).register(TtsCatalog.ENGINES)

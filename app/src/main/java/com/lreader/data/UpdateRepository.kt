@@ -5,6 +5,7 @@ import android.os.Handler
 import android.os.Looper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.Call
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
@@ -27,11 +28,20 @@ data class ReleaseInfo(
  * - 检查更新：GitHub Release API（失败回退 ghproxy 镜像）；
  * - 下载安装包：Release 附件（失败回退 ghproxy 镜像），下载完交给系统安装器
  *   （复用 `TtsInstaller` 的 FileProvider + ACTION_VIEW，**用户确认后才真正安装**）。
+ *
+ * 两处与「资源下载」统一的约定（见 [DictManager] / [DownloadNotifier]）：
+ *  1. 先写 `update-x.y.z.apk.part`，**大小与 APK(ZIP) 头都校验通过才改名**成正式文件，
+ *     所以缓存里出现 `update-*.apk` 就意味着它一定是完整可安装的；
+ *  2. 下载期间在状态栏显示进度通知，通知里的「取消」能中断（经 [DownloadCenter] 找到
+ *     [cancelDownload] → `Call.cancel()`）。
  */
 class UpdateRepository(private val context: Context) {
 
     companion object {
         const val REPO = "genoling/ling-reader"
+
+        /** 该任务在 [DownloadCenter] / 状态栏通知里的 id */
+        const val DOWNLOAD_ID = "app-update"
 
         private val API_URLS = listOf(
             "https://api.github.com/repos/$REPO/releases/latest",
@@ -53,6 +63,14 @@ class UpdateRepository(private val context: Context) {
     }
 
     private val main = Handler(Looper.getMainLooper())
+
+    /** 正在进行的下载请求（取消用） */
+    @Volatile
+    private var activeCall: Call? = null
+
+    /** 本次下载是否被用户主动取消 */
+    @Volatile
+    private var cancelled = false
 
     private val http: OkHttpClient by lazy {
         OkHttpClient.Builder()
@@ -90,6 +108,15 @@ class UpdateRepository(private val context: Context) {
             @Suppress("DEPRECATION")
             info.versionCode.toLong()
         }
+    }
+
+    /** 上次下载是否被用户取消（UI 用它区分「失败」和「已取消」） */
+    fun wasCancelled(): Boolean = cancelled
+
+    /** 取消正在下载的更新包（状态栏通知的「取消」按钮） */
+    fun cancelDownload() {
+        cancelled = true
+        activeCall?.cancel()
     }
 
     /** 查询线上最新版本 */
@@ -131,63 +158,113 @@ class UpdateRepository(private val context: Context) {
     }
 
     /**
-     * 下载最新版安装包到 `cacheDir`。
+     * 下载最新版安装包到 `cacheDir`（**校验通过才落到正式文件名**）。
      * @param onProgress 0~1，**主线程**回调
+     * @return 成功=已校验的 APK 文件；null=失败或被取消（见 [wasCancelled]）
      */
     suspend fun download(info: ReleaseInfo, onProgress: (Float) -> Unit): File? =
         withContext(Dispatchers.IO) {
             if (info.apkUrl.isBlank()) return@withContext null
+            cancelled = false
             val target = File(context.cacheDir, "update-${info.version}.apk")
             val tmp = File(context.cacheDir, "update-${info.version}.apk.part")
-            val urls = listOf(info.apkUrl, "https://ghproxy.net/" + info.apkUrl)
-            for (url in urls) {
-                var ok = false
-                try {
-                    val request = Request.Builder().url(url).header("User-Agent", "LingReader").build()
-                    ok = http.newCall(request).execute().use { resp ->
-                        if (!resp.isSuccessful) return@use false
-                        val body = resp.body ?: return@use false
-                        val total = body.contentLength().takeIf { it > 0 } ?: info.sizeBytes
-                        body.byteStream().use { input ->
-                            FileOutputStream(tmp).use { out ->
-                                val buf = ByteArray(1 shl 16)
-                                var read = 0L
-                                var last = 0L
-                                while (true) {
-                                    val n = input.read(buf)
-                                    if (n <= 0) break
-                                    out.write(buf, 0, n)
-                                    read += n
-                                    val now = System.currentTimeMillis()
-                                    if (now - last >= 200) {
-                                        last = now
-                                        if (total > 0) {
-                                            val p = (read.toFloat() / total).coerceIn(0f, 0.99f)
-                                            main.post { onProgress(p) }
+            val title = "正在下载 LingReader ${info.version}"
+            DownloadNotifier.start(context, DOWNLOAD_ID, title)
+            DownloadCenter.register(DOWNLOAD_ID) { cancelDownload() }
+            var reason: String? = null
+            try {
+                val urls = listOf(info.apkUrl, "https://ghproxy.net/" + info.apkUrl)
+                for (url in urls) {
+                    if (cancelled) break
+                    var ok = false
+                    try {
+                        val request = Request.Builder().url(url).header("User-Agent", "LingReader").build()
+                        val call = http.newCall(request)
+                        activeCall = call
+                        ok = call.execute().use { resp ->
+                            if (!resp.isSuccessful) return@use false
+                            val body = resp.body ?: return@use false
+                            val total = body.contentLength().takeIf { it > 0 } ?: info.sizeBytes
+                            body.byteStream().use { input ->
+                                FileOutputStream(tmp).use { out ->
+                                    val buf = ByteArray(1 shl 16)
+                                    var read = 0L
+                                    var last = 0L
+                                    while (true) {
+                                        // 用户点了取消就立刻停：连接阶段（activeCall 还没建立）也能中断，
+                                        // 已建立连接时则由 Call.cancel() 提前抛出
+                                        if (cancelled) break
+                                        val n = input.read(buf)
+                                        if (n <= 0) break
+                                        out.write(buf, 0, n)
+                                        read += n
+                                        val now = System.currentTimeMillis()
+                                        if (now - last >= 200) {
+                                            last = now
+                                            if (total > 0) {
+                                                val p = (read.toFloat() / total).coerceIn(0f, 0.99f)
+                                                main.post { onProgress(p) }
+                                                DownloadNotifier.progress(context, DOWNLOAD_ID, title, p)
+                                            }
                                         }
                                     }
+                                    out.flush()
+                                    out.fd.sync()
                                 }
-                                out.flush()
-                                out.fd.sync()
                             }
+                            !cancelled && tmp.length() >= 1024
                         }
-                        tmp.length() >= 1024
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                        tmp.delete()
+                        reason = e.message ?: e.javaClass.simpleName
+                    } finally {
+                        activeCall = null
                     }
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                    tmp.delete()
-                }
-                if (ok) {
+                    if (cancelled) break
+                    if (!ok) continue
+
+                    // 完整性校验：与 Release 声明的字节数一致，且头两字节是 PK（APK 即 ZIP 包）
+                    val len = tmp.length()
+                    if (info.sizeBytes > 0 && len != info.sizeBytes) {
+                        reason = "文件大小不符：期望 ${info.sizeBytes} 字节，实际 $len 字节"
+                        tmp.delete()
+                        continue
+                    }
+                    if (!isZip(tmp)) {
+                        reason = "文件不是有效的安装包，下载可能被劫持或损坏"
+                        tmp.delete()
+                        continue
+                    }
+
                     if (target.exists()) target.delete()
                     if (tmp.renameTo(target)) {
                         main.post { onProgress(1f) }
+                        DownloadNotifier.finish(context, DOWNLOAD_ID, title, "下载完成，正在打开安装界面")
                         return@withContext target
                     }
                     tmp.delete()
+                    reason = "写入安装包失败（存储空间不足？）"
                 }
+                DownloadNotifier.failed(
+                    context, DOWNLOAD_ID, title,
+                    if (cancelled) "已取消下载" else "下载失败：${reason ?: "请换网络后重试"}"
+                )
+                null
+            } finally {
+                DownloadCenter.unregister(DOWNLOAD_ID)
             }
-            null
         }
+
+    /** APK 本质是 ZIP，头两字节固定 `PK` —— 避免把半包/被劫持的文件递给系统安装器 */
+    private fun isZip(f: File): Boolean = try {
+        f.inputStream().use { input ->
+            val head = ByteArray(4)
+            input.read(head) == 4 && head[0] == 0x50.toByte() && head[1] == 0x4B.toByte()
+        }
+    } catch (e: Exception) {
+        false
+    }
 
     private fun get(url: String): String? = try {
         val request = Request.Builder().url(url).header("User-Agent", "LingReader").build()

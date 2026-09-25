@@ -35,15 +35,19 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.ParagraphStyle
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextIndent
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 import com.lreader.analysis.WordAnalysis
 import com.lreader.book.BookParser
@@ -668,6 +672,8 @@ private fun WordText(
     bold: Boolean = false,
     /** 栏目 / 引用类块用次要色 */
     dim: Boolean = false,
+    /** 段落开头做首行缩进（样式与 [displayText] 必须一致，否则分页与渲染对不上） */
+    indentFirstLine: Boolean = false,
     theme: ReadingTheme,
     onWordClick: (String, String) -> Unit,
     onLongPressSentence: (String) -> Unit,
@@ -676,9 +682,9 @@ private fun WordText(
     // levelsReady 必须参与 key：LevelDictionary 的索引是普通对象（非 Compose State），
     // 不入 key 时索引就绪后不会重新着色（历史 bug：首次进入无色，切章才上色）。
     val annotated = remember(
-        text, enabledLevels, vocabWords, highlightVocab, skipBasic, levelsReady
+        text, enabledLevels, vocabWords, highlightVocab, skipBasic, levelsReady, indentFirstLine
     ) {
-        buildAnnotatedString {
+        val plain = buildAnnotatedString {
             val wordRegex = Regex("[A-Za-z][A-Za-z'\\-]*[A-Za-z]|[A-Za-z]")
             var last = 0
             for (m in wordRegex.findAll(text)) {
@@ -710,6 +716,16 @@ private fun WordText(
                 last = m.range.last + 1
             }
             if (last < text.length) append(text.substring(last))
+        }
+        // 首行缩进：与测量侧 displayText 同源（只挂段落样式、不增删字符，查词 offset 不受影响）
+        if (indentFirstLine) {
+            buildAnnotatedString {
+                withStyle(ParagraphStyle(textIndent = TextIndent(firstLine = INDENT_CHARS.em))) {
+                    append(plain)
+                }
+            }
+        } else {
+            plain
         }
     }
 
@@ -857,6 +873,10 @@ private fun parseBlocks(seg: String): List<TextBlock> {
 
     for (c in seg) {
         when {
+            // Windows 文本（TXT 原文 / EPUB 源文件多是 CRLF）里段间空行是 "\r\n\r\n"：
+            // CR 必须忽略，否则 buf 末尾永远是 '\r'，「连续两个换行」判定永不成立 → 整章挤成一块，
+            // 首行缩进与段间距只在第一片生效（分页后 2~N 页缩进全丢）
+            c == '\r' -> {}
             c == '\n' -> if (buf.isNotEmpty() && buf.last() == '\n') flush() else buf.append(c)
             // 链接标记：不切块，让「• 」这类前缀与链接文字待在同一块里
             c == BookParser.MARK_LINK -> targetBuf = StringBuilder()
@@ -896,13 +916,49 @@ private fun blockStyle(kind: BlockKind, fontSize: Float, lineHeight: Float, them
         color = if (kind.dim) theme.secondaryText else theme.text
     )
 
+/** 首行缩进的字符数（2 = 中文书籍习惯）。改动会改变每段行数 → 分页随之变化，属正常 */
+private const val INDENT_CHARS = 2f
+
+/**
+ * 段间距（相对行高的倍数）：段落之间空一行，与「整段一个 Text + `\n\n`」时期观感一致。
+ * 0 = 段间不额外留白（会像 v1.6.0 之前那样贴在一起）。
+ */
+private const val PARA_GAP_RATIO = 1f
+
+/** 正文 / 引文首行缩进；标题与列表项（"• "、"- "、"1. "）不缩进更自然 */
+private fun needsIndent(kind: BlockKind, text: String): Boolean {
+    if (kind != BlockKind.BODY && kind != BlockKind.QUOTE) return false
+    val t = text.trimStart()
+    return !(t.startsWith("•") || t.startsWith("·") || t.startsWith("- ") || t.startsWith("* "))
+}
+
+/**
+ * 带首行缩进的显示文本（**测量与渲染共用**）。
+ * 只挂段落样式、不增删字符，因此查词用的字符 offset 不受影响。
+ */
+private fun displayText(text: String, kind: BlockKind): AnnotatedString =
+    if (needsIndent(kind, text)) {
+        buildAnnotatedString {
+            withStyle(ParagraphStyle(textIndent = TextIndent(firstLine = INDENT_CHARS.em))) {
+                append(text)
+            }
+        }
+    } else {
+        AnnotatedString(text)
+    }
+
 /** 页内内容块：文字段或插图（**按原文顺序混排**，与杂志/书的版式一致） */
 private sealed interface PageBlock {
     data class Text(
         val text: String,
         val kind: BlockKind = BlockKind.BODY,
         /** 非空表示整块是内部链接（点击跳章） */
-        val link: String? = null
+        val link: String? = null,
+        /**
+         * 这一片是所在**段落的开头**：渲染时在它上方留段间距、正文还要做首行缩进。
+         * 段落被切到下一页的后续片为 false（不重复缩进，也不在页首多留空白）。
+         */
+        val startsParagraph: Boolean = true
     ) : PageBlock
     /** [heightPx] 是本页该图的实际显示高度（按正文宽度等比算出，分页时已计入） */
     data class Image(val image: ChapterImage, val heightPx: Float) : PageBlock
@@ -920,6 +976,7 @@ private data class ReaderPage(val blocks: List<PageBlock>)
  * @param blocksPerSeg 先按 [BookParser.IMG_MARK] 切段、再各自解析成的块序列；段 i 之后是第 i 张图
  * @param layouts      各文字块的排版结果，key = [layoutKey]
  * @param imageHeights 各图在正文宽度下的高度（px）
+ * @param gapPx        段间距（px）：段与段之间空一行，与渲染侧的 Spacer 同源，缺一不可
  */
 private fun paginateFlow(
     blocksPerSeg: List<List<TextBlock>>,
@@ -927,7 +984,8 @@ private fun paginateFlow(
     layouts: Map<Long, TextLayoutResult>,
     imageHeights: Map<Int, Float>,
     pageHeight: Float,
-    lineHeight: Float
+    lineHeight: Float,
+    gapPx: Float
 ): List<ReaderPage> {
     val pages = ArrayList<ReaderPage>()
     var blocks = ArrayList<PageBlock>()
@@ -943,13 +1001,22 @@ private fun paginateFlow(
 
     for (si in blocksPerSeg.indices) {
         blocksPerSeg[si].forEachIndexed { bi, tb ->
-            val lr = layouts[layoutKey(si, bi)] ?: return@forEachIndexed
+            val lr = layouts[layoutKey(si, bi)]
+            if (lr == null) return@forEachIndexed
             if (tb.text.isEmpty() || lr.lineCount <= 0) return@forEachIndexed
             // 该块的行高（标题字号大 → 行高也大）：取排版结果第一行的实际高度
             val blockLine = (lr.getLineBottom(0) - lr.getLineTop(0)).toFloat()
                 .takeIf { it > 0f } ?: (lineHeight * tb.kind.scale)
             var startLine = 0
+            var gapApplied = false
             while (startLine < lr.lineCount) {
+                // 段首留段间距：本页已有内容才留（页首不留，否则页面顶部凭空空一行）
+                if (startLine == 0 && !gapApplied) {
+                    gapApplied = true
+                    if (blocks.isNotEmpty() && gapPx > 0f) {
+                        if (used + gapPx <= pageHeight) used += gapPx else flush()
+                    }
+                }
                 var room = (pageHeight - used) / blockLine
                 if (room < 1f) {
                     flush()
@@ -960,7 +1027,14 @@ private fun paginateFlow(
                 val start = lr.getLineStart(startLine)
                 val end = if (endLine >= lr.lineCount) tb.text.length else lr.getLineStart(endLine)
                 if (end > start) {
-                    blocks.add(PageBlock.Text(tb.text.substring(start, end), tb.kind, tb.link))
+                    blocks.add(
+                        PageBlock.Text(
+                            text = tb.text.substring(start, end),
+                            kind = tb.kind,
+                            link = tb.link,
+                            startsParagraph = startLine == 0
+                        )
+                    )
                     used += (endLine - startLine) * blockLine
                 }
                 startLine = endLine
@@ -1081,7 +1155,8 @@ private fun PagedReader(
                 layouts = segLayouts,
                 imageHeights = imageHeights,
                 pageHeight = pageHeightPx,
-                lineHeight = lineHeightPx
+                lineHeight = lineHeightPx,
+                gapPx = lineHeightPx * PARA_GAP_RATIO
             )
             if (built.isNotEmpty()) pages = built
         }
@@ -1098,8 +1173,8 @@ private fun PagedReader(
                     segBlocks.forEachIndexed { bi, tb ->
                         if (tb.text.isNotEmpty()) {
                             Text(
-                                text = tb.text,
-                                // 与渲染用同一份样式，否则测出的行数与实际排版对不上
+                                // 用与渲染同一份「带首行缩进」的文本 + 同一份样式，否则测出的行数与实际排版对不上
+                                text = displayText(tb.text, tb.kind),
                                 style = blockStyle(tb.kind, fontSize, lineHeight, theme),
                                 modifier = Modifier.fillMaxWidth(),
                                 onTextLayout = { lr ->
@@ -1168,7 +1243,13 @@ private fun PagedReader(
                         .fillMaxSize()
                         .padding(horizontal = 18.dp, vertical = 12.dp)
                 ) {
-                    page.blocks.forEach { block ->
+                    // 段间距（px → dp，与 paginateFlow 里累加的 gapPx 同源）
+                    val gapDp = with(density) { (lineHeightPx * PARA_GAP_RATIO).toDp() }
+                    page.blocks.forEachIndexed { index, block ->
+                        // 段间距：本页第一块不加（页面顶部留白会显得空）
+                        if (index > 0 && block is PageBlock.Text && block.startsParagraph) {
+                            Spacer(Modifier.height(gapDp))
+                        }
                         when (block) {
                             is PageBlock.Text -> {
                                 val target = block.link
@@ -1199,6 +1280,9 @@ private fun PagedReader(
                                         theme = theme,
                                         onWordClick = onWordClick,
                                         onLongPressSentence = onLongPressSentence,
+                                        // 首行缩进：只缩「段落开头那一片」的正文（与测量侧同源）
+                                        indentFirstLine = block.startsParagraph &&
+                                            needsIndent(block.kind, block.text),
                                         modifier = Modifier.fillMaxWidth()
                                     )
                                 }

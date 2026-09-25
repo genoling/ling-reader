@@ -4,6 +4,8 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import com.lreader.data.DownloadCenter
+import com.lreader.data.DownloadNotifier
 import com.lreader.data.SettingsStore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -181,9 +183,12 @@ class DictManager private constructor(private val context: Context) {
         if (jobs[res.id]?.isActive == true) return
         val target = fileOf(res)
         val part = File(context.filesDir, res.fileName + PART_SUFFIX)
+        val title = "正在下载 ${res.name}"
 
-        // 记录开始下载时的进度回调节流时间
         setState(res.id) { it.copy(downloading = true, progress = 0f, error = null) }
+        // 状态栏进度通知 + 登记取消入口（通知里的「取消」按钮经 DownloadCancelReceiver 找回来）
+        DownloadNotifier.start(context, res.id, title)
+        DownloadCenter.register(res.id) { cancel(res) }
 
         val job = scope.launch {
             try {
@@ -211,6 +216,8 @@ class DictManager private constructor(private val context: Context) {
                                     lastTick = now
                                     val p = if (total > 0) (read.toFloat() / total) else 0f
                                     setState(res.id) { it.copy(progress = p.coerceIn(0f, 0.99f)) }
+                                    // 服务端没给 Content-Length 时保持「不确定进度」的通知，别显示假百分比
+                                    if (total > 0) DownloadNotifier.progress(context, res.id, title, p)
                                 }
                             }
                             out.flush()
@@ -230,20 +237,26 @@ class DictManager private constructor(private val context: Context) {
                     throw IOException("文件不是有效的 APK 安装包，下载可能被劫持或损坏")
                 }
 
+                // 校验通过才改名：正式文件一旦出现就一定可用（半成品只会是 .part）
                 if (target.exists()) target.delete()
                 if (!part.renameTo(target)) throw IOException("写入目标文件失败（存储空间不足？）")
                 setState(res.id) { Status(installed = true) }
+                DownloadNotifier.finish(context, res.id, res.name, "下载完成，可以使用了")
                 Log.i(TAG, "下载完成：${res.name}（$len 字节）")
             } catch (e: CancellationException) {
                 part.delete()
                 setState(res.id) { Status(installed = fileReady(res)) }
+                DownloadNotifier.dismiss(context, res.id)
                 throw e
             } catch (e: Exception) {
                 Log.w(TAG, "下载失败：${res.name}", e)
                 part.delete()
-                setState(res.id) { Status(installed = fileReady(res), error = friendlyError(e)) }
+                val message = friendlyError(e)
+                setState(res.id) { Status(installed = fileReady(res), error = message) }
+                DownloadNotifier.failed(context, res.id, res.name, "下载失败：$message")
             } finally {
                 jobs.remove(res.id)
+                DownloadCenter.unregister(res.id)
             }
         }
         jobs[res.id] = job
@@ -253,8 +266,15 @@ class DictManager private constructor(private val context: Context) {
     fun cancel(res: DictResource) {
         jobs[res.id]?.cancel()
         jobs.remove(res.id)
+        DownloadCenter.unregister(res.id)
+        DownloadNotifier.dismiss(context, res.id)
         File(context.filesDir, res.fileName + PART_SUFFIX).delete()
         setState(res.id) { Status(installed = fileReady(res)) }
+    }
+
+    /** 按 id 取消（状态栏通知的「取消」按钮走这里） */
+    fun cancelById(id: String) {
+        (DictCatalog.byId(id) ?: extra[id])?.let { cancel(it) }
     }
 
     /** 删除已安装的**可删除**资源（内置资源返回 false，防止把分级高亮彻底删没） */
@@ -262,6 +282,8 @@ class DictManager private constructor(private val context: Context) {
         if (!res.removable) return false
         jobs[res.id]?.cancel()
         jobs.remove(res.id)
+        DownloadCenter.unregister(res.id)
+        DownloadNotifier.dismiss(context, res.id)
         File(context.filesDir, res.fileName + PART_SUFFIX).delete()
         val ok = fileOf(res).delete()
         setState(res.id) { Status() }

@@ -1,9 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   FileProvider 可对外共享的目录。
-  目前只有「下载的语音引擎 APK」需要交给系统安装器（见 TtsInstaller），
-  文件都落在 filesDir 根目录，故 path="." 。
+  交给系统安装器（见 TtsInstaller / UpdateRepository）的 APK 有两处来源：
+  - 语音引擎：下载到 filesDir 根目录 → files-path
+  - 应用更新包：下载到 cacheDir 根目录 → cache-path
+  两个目录都必须声明，否则 getUriForFile 会抛
+  「Failed to find configured root that contains ...」（更新失败即此因）。
 -->
 <paths>
     <files-path name="files" path="." />
+    <cache-path name="cache" path="." />
 </paths>

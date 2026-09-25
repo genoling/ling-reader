@@ -1,6 +1,11 @@
 package com.lreader.ui.settings
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -26,6 +31,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import com.lreader.data.ReleaseInfo
 import com.lreader.data.SettingsStore
 import com.lreader.data.UpdateRepository
@@ -152,6 +158,28 @@ fun SettingsScreen(onOpenAdmin: () -> Unit = {}) {
     var downloading by remember { mutableStateOf(false) }
     var downloadProgress by remember { mutableStateOf(0f) }
 
+    // Android 13+ 的状态栏下载进度通知需要运行时权限：未授权时先申请再下载
+    var pendingDownload by remember { mutableStateOf<(() -> Unit)?>(null) }
+    val notifyPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) {
+        // 无论用户允许与否都继续下载：通知只是「看得见的进度」，不是下载的前提
+        pendingDownload?.invoke()
+        pendingDownload = null
+    }
+
+    fun withNotifyPermission(action: () -> Unit) {
+        val granted = Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(
+            context, Manifest.permission.POST_NOTIFICATIONS
+        ) == PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            action()
+        } else {
+            pendingDownload = action
+            notifyPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
     fun checkUpdate() {
         scope.launch {
             checking = true
@@ -171,16 +199,19 @@ fun SettingsScreen(onOpenAdmin: () -> Unit = {}) {
 
     fun downloadAndInstall() {
         val info = newRelease ?: return
-        scope.launch {
-            downloading = true
-            downloadProgress = 0f
-            val file = updater.download(info) { downloadProgress = it }
-            downloading = false
-            if (file == null) {
-                updateError = "下载失败，请换网络后重试"
-            } else {
-                TtsInstaller.install(context, file).onFailure {
-                    updateError = "无法打开安装界面：${it.message ?: ""}"
+        withNotifyPermission {
+            scope.launch {
+                downloading = true
+                downloadProgress = 0f
+                updateError = null
+                val file = updater.download(info) { downloadProgress = it }
+                downloading = false
+                if (file == null) {
+                    updateError = if (updater.wasCancelled()) "已取消下载" else "下载失败，请换网络后重试"
+                } else {
+                    TtsInstaller.install(context, file).onFailure {
+                        updateError = "无法打开安装界面：${it.message ?: ""}"
+                    }
                 }
             }
         }
@@ -321,7 +352,7 @@ fun SettingsScreen(onOpenAdmin: () -> Unit = {}) {
                                 else -> 0
                             },
                             url = dictMgr.urlOf(res),
-                            onDownload = { dictMgr.download(res) },
+                            onDownload = { withNotifyPermission { dictMgr.download(res) } },
                             onCancel = { dictMgr.cancel(res) },
                             onRemove = { dictMgr.remove(res) }
                         )
@@ -500,7 +531,7 @@ fun SettingsScreen(onOpenAdmin: () -> Unit = {}) {
                             res = eng,
                             status = dictMgr.statusOf(eng.id),
                             sizeOnDisk = dictMgr.sizeOnDisk(eng),
-                            onDownload = { dictMgr.download(eng) },
+                            onDownload = { withNotifyPermission { dictMgr.download(eng) } },
                             onCancel = { dictMgr.cancel(eng) },
                             onInstall = {
                                 TtsInstaller.install(context, dictMgr.fileOf(eng)).onFailure {
@@ -783,11 +814,18 @@ fun SettingsScreen(onOpenAdmin: () -> Unit = {}) {
                                 modifier = Modifier.fillMaxWidth()
                             )
                             Spacer(Modifier.height(4.dp))
-                            Text(
-                                "${(downloadProgress * 100).toInt()}%",
-                                fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    "${(downloadProgress * 100).toInt()}%",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Spacer(Modifier.weight(1f))
+                                // 状态栏通知里也能取消，这里给个就近入口
+                                TextButton(onClick = { updater.cancelDownload() }) {
+                                    Text("取消", fontSize = 12.sp)
+                                }
+                            }
                         }
 
                         newRelease != null -> Column {
