@@ -21,11 +21,16 @@
   走 javac + `JdkImageTransform` 而构建失败（`jlink executable ... does not exist`，详见 `docs/development.md`）。
 - 未注入令牌的构建（他人 clone / CI）自动退化为原来的手填对话框，功能不受影响。
 - ⚠️ 令牌终究在 APK 里：拿到包的人可读写该私有仓库（能删，读到的只有密文）。
-  建议换成自己创建的 fine-grained token（只授权 `ling-reader-sync` + Contents 读写，随时可吊销）。
+  故内嵌的是**专门为此创建的 fine-grained PAT**：Repository access = Only select repositories
+  只勾 `ling-reader-sync`，权限仅 `Contents: Read and write`，其它权限一律 `No access`
+  （实测该令牌枚举私有仓库只可见 `ling-reader-sync`，且读不到其它仓库的设置接口）。泄露随时可吊销。
 
 **校验**
 - 模拟器实测：设置 → 云同步 → 点「一键生成」→ 显示「已配置：genoling/ling-reader-sync」「目录 users/…」+
   「同步完成」；同一令牌独立调 GitHub Contents API PUT→DELETE 成功，云端 `users/` 下确认出现该目录。
+- 发布前用**内置的正式 fine-grained token**复核：`/user/repos` 仅可见 `ling-reader-sync` 一个私有仓库
+  （其余为公开仓库的只读访问，fine-grained token 固有行为）→ Contents `PUT` / `DELETE` 均成功，
+  `assembleDebug` 产物 `resources.arsc` 中 `sync_token` 已为新令牌。
 - `assembleDebug` 零警告；`versionCode` 17 → **18**，`versionName` `1.5.2` → **`1.6.0`**。
 
 ---
