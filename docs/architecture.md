@@ -62,6 +62,7 @@ ling-reader/                       # ★ Android 工程根目录（GitHub 仓库
             │   ├── SyncEngine.kt          # ★ 通用双向合并（下载→解密→合并→加密上传，sha 乐观锁 + 冲突重试）
             │   ├── SyncCrypto.kt          # 端到端加密：PBKDF2(口令, salt=syncId, 12 万轮) → AES-256-GCM
             │   ├── SyncCode.kt            # 同步码：仓库 + token + 用户目录 + 口令打包成一个字符串
+            │   ├── SyncDefaults.kt       # 内置同步仓库默认值（「一键生成」用；token 构建时由 resValue 注入）
             │   ├── GithubBackend.kt       # GitHub Contents API 后端（私有仓库，每人一个目录）
             │   ├── VocabSync.kt           # 生词本同步（云端是加密 CSV）
             │   ├── ProgressSync.kt        # 阅读进度（章节 + 章内百分比）
@@ -353,6 +354,9 @@ bookId 用 `URLEncoder/URLDecoder` 编解码（因为它可能是文件路径）
 - 主键：生词用 `uid`（老数据升级时自动补 UUID）；进度用**书名**（`Book.id` 是本机路径编码，跨设备不同）
 - 阅读页启动时会 `awaitInitialSync()` 短暂等同步结束，保证生词高亮与云端一致
 - 同步码 `LR1.<base64>` 内含口令，**云端只有密文**；同一同步码即同一个用户目录
+- 生成同步码：设置 → 云同步 → **「一键生成」**—— 仓库 / 分支 / 令牌预置在 `SyncDefaults`，
+  点一下即生成新同步码（新 `syncId` + 新口令）并立即同步一次；「自定义」入口可换成自己的仓库与 token。
+  令牌由构建时注入（`resValue("string", "sync_token")`，见 `docs/development.md`），未注入的构建自动退回手填对话框
 
 ### 点词查词
 

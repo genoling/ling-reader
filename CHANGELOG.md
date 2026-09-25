@@ -3,6 +3,33 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与 [语义化版本](https://semver.org/lang/zh-CN/)。
 版本号对应 `app/build.gradle.kts` 中的 `versionName` / `versionCode`。
 
+## [1.6.0] - 2026-09-25
+
+**云同步改为「一键生成」：仓库与令牌内置，不用再填任何内容。**
+
+**新增**
+- 设置 → 云同步 → **「一键生成」**：点一下直接得到同步码并立即同步 —— 仓库
+  （`genoling/ling-reader-sync`）、分支与令牌全部预置（见 `sync/SyncDefaults.kt`），
+  用户不再需要填 GitHub 用户名 / 仓库名 / token。
+- 原对话框保留为 **「自定义」**：想用自己的仓库或 token 时打开改即可（已预填内置默认值）。
+
+**实现**
+- 令牌由构建时注入：`app/build.gradle.kts` 读 `local.properties` 的 `sync.token`
+  （或环境变量 `LR_SYNC_TOKEN`）→ `resValue("string", "sync_token")` → `SyncDefaults.token(context)`。
+  `local.properties` 在 `.gitignore` 中，**令牌不进版本库**（本仓库是公开仓库，提交进去会被 GitHub 判定泄露并吊销）。
+- 用 `resValue` 而非 `buildConfigField`：本机 JBR 21.0.4 不带 `jlink`，开启 `buildConfig` 会让 AGP
+  走 javac + `JdkImageTransform` 而构建失败（`jlink executable ... does not exist`，详见 `docs/development.md`）。
+- 未注入令牌的构建（他人 clone / CI）自动退化为原来的手填对话框，功能不受影响。
+- ⚠️ 令牌终究在 APK 里：拿到包的人可读写该私有仓库（能删，读到的只有密文）。
+  建议换成自己创建的 fine-grained token（只授权 `ling-reader-sync` + Contents 读写，随时可吊销）。
+
+**校验**
+- 模拟器实测：设置 → 云同步 → 点「一键生成」→ 显示「已配置：genoling/ling-reader-sync」「目录 users/…」+
+  「同步完成」；同一令牌独立调 GitHub Contents API PUT→DELETE 成功，云端 `users/` 下确认出现该目录。
+- `assembleDebug` 零警告；`versionCode` 17 → **18**，`versionName` `1.5.2` → **`1.6.0`**。
+
+---
+
 ## [1.5.2] - 2026-09-25
 
 **改用正式签名（release keystore）发布：身份固定、可上架，此后所有版本都能直接覆盖安装。**

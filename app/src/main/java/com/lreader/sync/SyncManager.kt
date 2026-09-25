@@ -162,4 +162,16 @@ object SyncManager {
             token = token.trim(),
             passphrase = SyncCrypto.newPassphrase()
         )
+
+    /**
+     * 用**内置仓库**生成新的同步码（设置页「一键生成」用）：用户不用填仓库、分支、token，
+     * 点一下就有新的同步 id + 加密口令。见 [SyncDefaults]。
+     */
+    fun newDefaultConfig(context: Context): SyncConfig =
+        newConfig(
+            SyncDefaults.OWNER,
+            SyncDefaults.REPO,
+            SyncDefaults.BRANCH,
+            SyncDefaults.token(context)
+        )
 }

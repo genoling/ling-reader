@@ -81,10 +81,17 @@ $env:JAVA_HOME = 'E:\Program Files\PyCharm Community Edition 2024.2.4\jbr'
 | Android SDK | 需含 **platform android-33** + **build-tools 34.0.0** + licenses；缺失时 AGP 会**自动联网下载** |
 | Gradle | **8.9**（已由 `gradle/wrapper` 固定。注意：AGP 8.1.4 **不兼容 Gradle 9.x**，本机缓存的 9.3.0 不可直接用） |
 
-`local.properties` 需指向本机 SDK：
+`local.properties` 需指向本机 SDK；可选的 `sync.token` 供「一键生成同步码」使用（缺失则设置页退化为手填对话框）：
 ```properties
 sdk.dir=E\:\\Android_Sdk
+# 可选：云同步内置令牌 —— 构建时注入字符串资源 sync_token（见 app/build.gradle.kts 的 syncToken）
+sync.token=github_pat_xxx
 ```
+
+> ⚠️ **不要开启 `buildFeatures.buildConfig`**：本机 JBR 21.0.4 **不含 `jlink`**，
+> 一旦要生成 `BuildConfig` 就会新增 javac 任务，AGP 的 `JdkImageTransform` 随即报
+> `jlink executable E:\...\jbr\bin\jlink.exe does not exist` 而构建失败。
+> 需要给代码注入构建期常量时用 `resValue("string", ...)`（本项目 `sync_token` 就是这么做的）。
 
 > ⚠️ 本机环境（v1.0.2 实测）：
 > - 工程根目录为 `e:\ai_project\ling_reader\ling-reader`；

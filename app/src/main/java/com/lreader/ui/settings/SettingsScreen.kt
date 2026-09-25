@@ -39,6 +39,7 @@ import com.lreader.speech.SpeechManager
 import com.lreader.speech.TtsCatalog
 import com.lreader.speech.TtsInstaller
 import com.lreader.sync.SyncCode
+import com.lreader.sync.SyncDefaults
 import com.lreader.sync.SyncManager
 import com.lreader.translate.TranslationEngines
 import com.lreader.ui.theme.AppThemeState
@@ -1117,8 +1118,9 @@ private fun SyncSection(settings: SettingsStore) {
     Card {
         Column(Modifier.padding(14.dp)) {
             Text(
-                "生词本加密同步到自己的 GitHub 私有仓库：云端只存密文，仓库主人也读不到内容。" +
-                    "在第一台设备生成同步码，第二台粘贴同一个码即完成配对。",
+                "生词本 + 阅读进度加密同步到自己的 GitHub 私有仓库：云端只存密文。" +
+                    "第一台设备点「一键生成」拿到同步码，第二台粘贴同一个码即完成配对" +
+                    "（同步码等于钥匙，建议复制后存到备忘录）。",
                 fontSize = 12.sp,
                 lineHeight = 17.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1170,7 +1172,29 @@ private fun SyncSection(settings: SettingsStore) {
                     }
                 ) { Text("复制", fontSize = 12.sp) }
 
-                TextButton(onClick = { showGenerator = true }) { Text("生成", fontSize = 12.sp) }
+                // 一键生成：仓库与令牌已内置（见 SyncDefaults），用户不用填任何内容
+                TextButton(
+                    onClick = {
+                        if (SyncDefaults.ready(context)) {
+                            val code = SyncCode.encode(SyncManager.newDefaultConfig(context))
+                            settings.syncCode = code
+                            settings.syncAuto = true
+                            codeDraft = code
+                            runSync()
+                        } else {
+                            // 本次构建没带内置令牌：退回手填对话框
+                            showGenerator = true
+                        }
+                    }
+                ) {
+                    Text(
+                        if (SyncDefaults.ready(context)) "一键生成" else "生成",
+                        fontSize = 12.sp
+                    )
+                }
+
+                // 想换自己的仓库 / token 时才需要填
+                TextButton(onClick = { showGenerator = true }) { Text("自定义", fontSize = 12.sp) }
 
                 if (settings.syncCode.isNotBlank()) {
                     TextButton(
@@ -1201,26 +1225,30 @@ private fun SyncSection(settings: SettingsStore) {
     }
 }
 
-/** 「生成同步码」对话框：填仓库与 token，生成新的同步 id + 加密口令 */
+/**
+ * 「自定义仓库」对话框：**默认已预填内置仓库**（见 [SyncDefaults]），直接点「生成」即可；
+ * 想换成自己的仓库 / token 时才需要改动。
+ */
 @Composable
 private fun SyncCodeGeneratorDialog(
     onDismiss: () -> Unit,
     onCreated: (String) -> Unit
 ) {
-    var owner by remember { mutableStateOf("") }
-    var repo by remember { mutableStateOf("") }
-    var branch by remember { mutableStateOf("main") }
-    var token by remember { mutableStateOf("") }
+    val context = LocalContext.current
+    var owner by remember { mutableStateOf(SyncDefaults.OWNER) }
+    var repo by remember { mutableStateOf(SyncDefaults.REPO) }
+    var branch by remember { mutableStateOf(SyncDefaults.BRANCH) }
+    var token by remember { mutableStateOf(SyncDefaults.token(context)) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("生成同步码", fontSize = 16.sp) },
+        title = { Text("自定义同步仓库", fontSize = 16.sp) },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text(
-                    "1. 在 GitHub 建一个**私有**仓库（例如 lr-sync）\n" +
-                        "2. 生成 fine-grained token，权限只给 Contents: Read and write\n" +
-                        "3. 填在下面生成同步码，再复制到其它设备",
+                    "已预填内置仓库 ${SyncDefaults.repoLabel}，直接点「生成」就行。\n" +
+                        "想换成自己的仓库：在 GitHub 建一个**私有**仓库，" +
+                        "并生成 fine-grained token（权限只需 Contents: Read and write）。",
                     fontSize = 12.sp,
                     lineHeight = 17.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
