@@ -40,8 +40,8 @@ android {
         applicationId = "com.lreader"
         minSdk = 24
         targetSdk = 33
-        versionCode = 20
-        versionName = "1.6.2"
+        versionCode = 21
+        versionName = "1.6.3"
 
         // 一键生成同步码用的内置仓库令牌（见文件顶部的 syncToken；空串 = 未注入，走手填对话框）。
         // 用 resValue 而非 buildConfigField：本机 JBR 没有 jlink，一旦开启 buildConfig 就会触发

@@ -14,7 +14,7 @@ LingReader 的目录组织、模块职责与关键数据流。
 | AGP / Gradle / Kotlin | 8.1.4 / 8.9 / 1.8.10 |
 | Compose | Compose 1.4.3 + Compiler 1.4.3 + material3 1.1.2 |
 | 构建产物 | debug `app-debug.apk` ≈ 20.4 MB ／ release `app-release.apk` ≈ 14.5 MB（正式签名） |
-| 当前版本 | **v1.6.2**（`versionCode` = 20、`versionName` = `1.6.2`） |
+| 当前版本 | **v1.6.3**（`versionCode` = 21、`versionName` = `1.6.3`） |
 
 ### 设计原则
 

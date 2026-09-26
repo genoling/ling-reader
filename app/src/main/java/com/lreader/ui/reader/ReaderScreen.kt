@@ -142,8 +142,10 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
             chapterIndex = b.lastChapterIndex.coerceIn(0, (chapters.size - 1).coerceAtLeast(0))
             // 章内页码同样要恢复（复用 lastScrollY 存页码）：只恢复章号会「翻过的页白翻了」
             pageIndex = b.lastScrollY.coerceAtLeast(0)
-            // 没有本机页码、却有百分比 → 说明进度是从别的设备同步来的，交给阅读页按比例定位
-            restorePercent = if (b.lastScrollY <= 0 && b.lastPercent > 0f) b.lastPercent else -1f
+            // 本机页码是哨兵 -1（云同步合并时写入）且带百分比 → 进度来自别的设备，按比例定位。
+            // 用 <0 而非 <=0：lastScrollY=0 是合法的「第 1 页」，不能误当「无页码」去触发百分比定位
+            //（否则第 1 页的进度会被偏移到第 2 页）
+            restorePercent = if (b.lastScrollY < 0 && b.lastPercent > 0f) b.lastPercent else -1f
             // 目录（含层级），与章节用同一份解析结果，避免点击后跳错章
             tocList = BookParser.loadToc(b, chapters)
         }
@@ -311,7 +313,14 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
                     lineHeight = lineHeight,
                     onPagesReady = { pages = it },
                     // 定位完成后立刻复位：否则改字号 / 行距重新分页时会又跳回章末
-                    onPageChanged = { pageIndex = it; if (openAtLastPage) openAtLastPage = false },
+                    onPageChanged = {
+                        pageIndex = it
+                        // 百分比只用于「首次进入书恢复跨设备进度」：定位一次即作废。
+                        // 否则跨章时 pageIndex 被置 0，会再次命中「initialPage<=0」的百分比定位，
+                        // 用进入书时的旧百分比把新章错误地定位（上一章末页 lastPercent≈1 → 新章直接落到末页）
+                        restorePercent = -1f
+                        if (openAtLastPage) openAtLastPage = false
+                    },
                     // 跨章滑动：章末左滑 → 下一章第 1 页；章首右滑 → 上一章最后一页
                     onNextChapter = {
                         if (chapterIndex < chapters.size - 1) {
@@ -698,7 +707,8 @@ private fun WordText(
     indentFirstLine: Float = 0f,
     theme: ReadingTheme,
     onWordClick: (String, String) -> Unit,
-    onLongPressSentence: (String) -> Unit,
+    /** 长按位置在「本块文本」里的字符偏移；由分页层换算成整章偏移后取完整句子 */
+    onLongPressSentence: (Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
     // levelsReady 必须参与 key：LevelDictionary 的索引是普通对象（非 Compose State），
@@ -767,8 +777,9 @@ private fun WordText(
                     val down = awaitFirstDown(requireUnconsumed = false)
                     val longPress = awaitLongPressOrCancellation(down.id)
                     if (longPress != null) {
-                        // 长按 → 取该处所在整句，直接进入句子翻译弹层并开始翻译
-                        curLongPress(sentenceOf(text, lr.getOffsetForPosition(longPress.position)))
+                        // 长按 → 上报「本块内偏移」，由分页层换算成整章偏移再取完整句子：
+                        // 句子被页边界切成两页时，只有整章文本才能取全
+                        curLongPress(lr.getOffsetForPosition(longPress.position))
                     } else {
                         // 只有「原地抬手」才算点词；横向翻页 / 纵向下拉的位移要排除
                         val cur = currentEvent.changes.firstOrNull { it.id == down.id }
@@ -1034,9 +1045,15 @@ private fun paginateFlow(
             val lr = layouts[layoutKey(si, bi)]
             if (lr == null) return@forEachIndexed
             if (tb.text.isEmpty() || lr.lineCount <= 0) return@forEachIndexed
-            // 该块的行高（标题字号大 → 行高也大）：取排版结果第一行的实际高度
-            val blockLine = (lr.getLineBottom(0) - lr.getLineTop(0)).toFloat()
-                .takeIf { it > 0f } ?: (lineHeight * tb.kind.scale)
+            // 每行平均高度 = 整块高度 / 行数。**不能**用「第一行高度」：
+            // 首行/末行带额外 leading，第一行高度明显小于平均行高（实测行距 26 时
+            // 第一行 52~54px、平均约 57.6px），按行数估算会偏小，误差在页内累积，
+            // 最后几行被挤出屏幕 —— 就是用户看到的「文章末尾有句子看不到」。
+            val avgLine = if (lr.lineCount > 0 && lr.size.height > 0) {
+                lr.size.height.toFloat() / lr.lineCount
+            } else {
+                lineHeight * tb.kind.scale
+            }
             var startLine = 0
             var gapApplied = false
             while (startLine < lr.lineCount) {
@@ -1048,10 +1065,10 @@ private fun paginateFlow(
                         if (used + gap <= pageHeight) used += gap else flush()
                     }
                 }
-                var room = (pageHeight - used) / blockLine
+                var room = (pageHeight - used) / avgLine
                 if (room < 1f) {
                     flush()
-                    room = pageHeight / blockLine
+                    room = pageHeight / avgLine
                 }
                 val canLines = room.toInt().coerceAtLeast(1)
                 val endLine = minOf(startLine + canLines, lr.lineCount)
@@ -1066,7 +1083,9 @@ private fun paginateFlow(
                             startsParagraph = startLine == 0
                         )
                     )
-                    used += (endLine - startLine) * blockLine
+                    // 用真实的「起始行顶 → 结束行底」高度累加（而非 行数 × 平均行高），
+                    // 保证 used 与实际渲染高度一致，末尾不再溢出
+                    used += (lr.getLineBottom(endLine - 1) - lr.getLineTop(startLine)).toFloat()
                 }
                 startLine = endLine
                 if (startLine < lr.lineCount) flush()
@@ -1234,6 +1253,29 @@ private fun PagedReader(
             // 首帧就渲染末页：分页是异步的，定位只能发生在分页之后，若这一帧仍按 idx(=0) 渲染，
             // 就会先闪一下「本章开头」再跳到末尾；pendingEnd 期间直接用末页作为显示页即可避免
             val renderIdx = if (pendingEnd) pages.lastIndex else idx
+            // 整章可读文本（按页序拼接所有文本块）：跨页的句子在原文里是连续的，
+            // 长按翻译时用它把被页边界切断的句子补全（用户 2026-09-26 需求）
+            val fullText = remember(pages) {
+                buildString {
+                    pages.forEach { p ->
+                        p.blocks.forEach { b -> if (b is PageBlock.Text) append(b.text) }
+                    }
+                }
+            }
+            // 每个文本块在 fullText 里的起始偏移：(页序号 to 块序号) -> 偏移
+            val blockOffsets = remember(pages) {
+                val m = HashMap<Pair<Int, Int>, Int>()
+                var acc = 0
+                pages.forEachIndexed { pi, p ->
+                    p.blocks.forEachIndexed { bi, b ->
+                        if (b is PageBlock.Text) {
+                            m[pi to bi] = acc
+                            acc += b.text.length
+                        }
+                    }
+                }
+                m
+            }
             // 分页是异步的：页数就绪后再校正定位
             LaunchedEffect(pages.size) {
                 if (pages.isEmpty()) return@LaunchedEffect
@@ -1350,7 +1392,11 @@ private fun PagedReader(
                                         dim = block.kind.dim,
                                         theme = theme,
                                         onWordClick = onWordClick,
-                                        onLongPressSentence = onLongPressSentence,
+                                        // 本块在整章文本里的起点 + 块内偏移 = 整章偏移，再取完整句子
+                                        onLongPressSentence = { off ->
+                                            val start = blockOffsets[i to index] ?: 0
+                                            onLongPressSentence(sentenceOf(fullText, start + off))
+                                        },
                                         // 首行缩进：只缩「段落开头那一片」；量按**正文字号**算，
                                         // 这样标题与栏目行缩进同一个位置（与测量侧同源）
                                         indentFirstLine = if (block.startsParagraph &&

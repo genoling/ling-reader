@@ -97,7 +97,7 @@ object SyncManager {
         )
     }
 
-    /** 把合并后的进度写回 `bookshelf.json`；页码置 0，让阅读页按百分比定位 */
+    /** 把合并后的进度写回 `bookshelf.json`；页码置 -1（无本机页码哨兵），让阅读页按百分比定位 */
     private fun applyProgress(bookRepo: BookRepository, items: List<ProgressEntry>): Int {
         val list = bookRepo.load()
         var changed = 0
@@ -112,7 +112,7 @@ object SyncManager {
                     list[i] = b.copy(
                         lastChapterIndex = e.chapterIndex,
                         lastPercent = e.percent,
-                        lastScrollY = 0,
+                        lastScrollY = -1,
                         progressUpdatedAt = e.updatedAt
                     )
                     changed++

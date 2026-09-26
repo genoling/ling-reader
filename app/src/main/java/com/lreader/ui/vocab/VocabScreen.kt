@@ -7,6 +7,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.MoreVert
@@ -36,11 +37,19 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
+/** 生词本的分类方式（列表排序 / 分组） */
+private enum class VocabGroup(val label: String) {
+    NONE("默认"),
+    SOURCE("按来源书"),
+    LEVEL("按等级")
+}
+
 /**
  * 生词本列表页。
  *
  * 列表只呈现「单词 / 音标 / 词性 / 含义」四项，保持简洁；
  * 整行点击即朗读，右上角可把生词本导出为 CSV / JSON。
+ * 支持按「来源书 / 分级词库（雅思托福等）」分类查看。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -60,6 +69,11 @@ fun VocabScreen(
     var query by remember { mutableStateOf("") }
     var dueCount by remember { mutableStateOf(0) }
     var showMenu by remember { mutableStateOf(false) }
+    /** 分类方式：默认按加入顺序，也可按来源书 / 分级词库分组 */
+    var groupBy by remember { mutableStateOf(VocabGroup.NONE) }
+    val listState = rememberLazyListState()
+    // 切换分类后回到列表顶部，否则会停在旧的滚动位置（看不到第一个分组标题）
+    LaunchedEffect(groupBy) { listState.scrollToItem(0) }
 
     // 单词详情弹层（点击某一行打开；打开时自动朗读一次）
     var detailWord by remember { mutableStateOf<VocabWord?>(null) }
@@ -165,6 +179,19 @@ fun VocabScreen(
         else words.filter {
             it.word.contains(query, ignoreCase = true) ||
                 it.meaning.contains(query, ignoreCase = true)
+        }
+    }
+
+    // 分类后的 (组标题, 该组单词)；默认只有一组、标题为空（不显示分组头）
+    val grouped = remember(filtered, groupBy) {
+        when (groupBy) {
+            VocabGroup.NONE -> listOf("" to filtered)
+            VocabGroup.SOURCE -> filtered
+                .groupBy { it.sourceBook.trim().ifBlank { "未知来源" } }
+                .entries.sortedBy { it.key }.map { it.key to it.value }
+            VocabGroup.LEVEL -> filtered
+                .groupBy { it.level.trim().ifBlank { "未分级" } }
+                .entries.sortedBy { it.key }.map { it.key to it.value }
         }
     }
 
@@ -277,6 +304,22 @@ fun VocabScreen(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp)
             )
 
+            // 分类：默认 / 按来源书 / 按等级（雅思托福等分级词库）
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                VocabGroup.values().forEach { g ->
+                    FilterChip(
+                        selected = groupBy == g,
+                        onClick = { groupBy = g },
+                        label = { Text(g.label, fontSize = 12.sp) }
+                    )
+                }
+            }
+
             if (filtered.isEmpty()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -294,18 +337,32 @@ fun VocabScreen(
                 }
             } else {
                 LazyColumn(
+                    state = listState,
                     contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    items(filtered, key = { it.id }) { w ->
-                        VocabRow(
-                            w = w,
-                            onOpen = { openDetail(w) },
-                            onDelete = {
-                                repo.remove(w.id)
-                                refresh()
+                    grouped.forEach { (title, list) ->
+                        if (title.isNotEmpty()) {
+                            item(key = "header-$title") {
+                                Text(
+                                    "$title (${list.size})",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(top = 4.dp)
+                                )
                             }
-                        )
+                        }
+                        items(list, key = { it.id }) { w ->
+                            VocabRow(
+                                w = w,
+                                onOpen = { openDetail(w) },
+                                onDelete = {
+                                    repo.remove(w.id)
+                                    refresh()
+                                }
+                            )
+                        }
                     }
                 }
             }

@@ -14,6 +14,7 @@ import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -27,6 +28,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.lreader.model.DictEntry
 import com.lreader.model.TranslationResult
+import kotlinx.coroutines.delay
 
 /**
  * 查词结果底部弹层。
@@ -52,14 +54,26 @@ fun DictBottomSheet(
     translation: TranslationResult?,
     onDismiss: () -> Unit
 ) {
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    // skipPartiallyExpanded：Sheet 始终「完全展开」。否则译文插入让内容变高时，
+    // ModalBottomSheet 会重排回「部分展开」，视觉上就是用户说的「整个详情刷新、回到头」。
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
+        val scrollState = rememberScrollState()
+        // 兜底：翻译完成后主动再展开一次（并滚到底），确保停在译文处
+        LaunchedEffect(translation) {
+            if (translation != null) {
+                delay(60)
+                sheetState.expand()
+                scrollState.animateScrollTo(scrollState.maxValue)
+            }
+        }
         // 整个弹层是一个滚动面：释义可能很长（多词性词条动辄十几屏），
         // 下方的「原文句子 + 译文」必须能一路滑到底，故不给固定 maxHeight。
         Column(
             Modifier
                 .fillMaxWidth()
                 .heightIn(min = 260.dp)
-                .verticalScroll(rememberScrollState())
+                .verticalScroll(scrollState)
                 .padding(bottom = 16.dp)
         ) {
             // 标题行
