@@ -4,10 +4,12 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.MoreVert
@@ -40,6 +42,7 @@ import java.io.File
 /** 生词本的分类方式（列表排序 / 分组） */
 private enum class VocabGroup(val label: String) {
     NONE("默认"),
+    TIME("按时间"),
     SOURCE("按来源书"),
     LEVEL("按等级")
 }
@@ -69,7 +72,7 @@ fun VocabScreen(
     var query by remember { mutableStateOf("") }
     var dueCount by remember { mutableStateOf(0) }
     var showMenu by remember { mutableStateOf(false) }
-    /** 分类方式：默认按加入顺序，也可按来源书 / 分级词库分组 */
+    /** 分类方式：默认按加入顺序，也可按时间 / 来源书 / 分级词库分组 */
     var groupBy by remember { mutableStateOf(VocabGroup.NONE) }
     val listState = rememberLazyListState()
     // 切换分类后回到列表顶部，否则会停在旧的滚动位置（看不到第一个分组标题）
@@ -186,6 +189,9 @@ fun VocabScreen(
     val grouped = remember(filtered, groupBy) {
         when (groupBy) {
             VocabGroup.NONE -> listOf("" to filtered)
+            // 按「加入日期」分组。列表本身已是 add_date 倒序，groupBy 保持相遇顺序，
+            // 所以组间（日期）与组内（同一天）都自然是新 → 旧，不用再排序。
+            VocabGroup.TIME -> filtered.groupBy { dayLabel(it.addDate) }.map { it.key to it.value }
             VocabGroup.SOURCE -> filtered
                 .groupBy { it.sourceBook.trim().ifBlank { "未知来源" } }
                 .entries.sortedBy { it.key }.map { it.key to it.value }
@@ -308,6 +314,7 @@ fun VocabScreen(
             Row(
                 Modifier
                     .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
                     .padding(horizontal = 14.dp, vertical = 2.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
@@ -383,6 +390,24 @@ fun VocabScreen(
             onSpeak = { speech.speak(w.word) },
             onDismiss = { detailWord = null }
         )
+    }
+}
+
+/** 「按时间」分组的日期标题：今天 / 昨天 / yyyy-MM-dd */
+private fun dayLabel(ms: Long): String {
+    fun startOfDay(offsetDays: Int): Long = java.util.Calendar.getInstance().apply {
+        add(java.util.Calendar.DAY_OF_YEAR, offsetDays)
+        set(java.util.Calendar.HOUR_OF_DAY, 0)
+        set(java.util.Calendar.MINUTE, 0)
+        set(java.util.Calendar.SECOND, 0)
+        set(java.util.Calendar.MILLISECOND, 0)
+    }.timeInMillis
+
+    return when {
+        ms >= startOfDay(0) -> "今天"
+        ms >= startOfDay(-1) -> "昨天"
+        else -> java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault())
+            .format(java.util.Date(ms))
     }
 }
 

@@ -145,4 +145,38 @@ class SettingsStore(context: Context) {
     var lastSyncAt: Long
         get() = obj.optLong("lastSyncAt", 0L)
         set(v) { obj.put("lastSyncAt", v); persist() }
+
+    // ---- 有道生词本（见 data/YoudaoWordbook.kt）----
+    /**
+     * 有道网页登录后的 Cookie：**属于每个用户自己的账号**（换账号 = 换 Cookie）。
+     * 空串 = 未登录。由设置页的 WebView 登录后自动写入。
+     */
+    var youdaoCookie: String
+        get() = obj.optString("youdaoCookie", "")
+        set(v) { obj.put("youdaoCookie", v.trim()); persist() }
+
+    /** 有道账号昵称 / 标识（仅界面显示用；从登录页读取，可能为空） */
+    var youdaoAccount: String
+        get() = obj.optString("youdaoAccount", "")
+        set(v) { obj.put("youdaoAccount", v.trim()); persist() }
+
+    /** 上次同步到有道的时间（毫秒，0 = 从未同步） */
+    var lastYoudaoAt: Long
+        get() = obj.optLong("lastYoudaoAt", 0L)
+        set(v) { obj.put("lastYoudaoAt", v); persist() }
+
+    /**
+     * 同步到有道的**目标单词本** bookId；空串 或 [YoudaoWordbook.DEFAULT_BOOK_ID]("0") = 默认「无标签」本。
+     *
+     * 词默认只会进「无标签」，而部分客户端（如有道翻译电脑版）只列具名单词本 —— 那样词会"看不到"，
+     * 所以允许指定一个具名单词本，同步后自动把词归类过去。
+     */
+    var youdaoBookId: String
+        get() = obj.optString("youdaoBookId", "")
+        set(v) { obj.put("youdaoBookId", v.trim()); persist() }
+
+    /** 目标单词本的显示名（仅界面用，避免每次都要拉接口） */
+    var youdaoBookName: String
+        get() = obj.optString("youdaoBookName", "")
+        set(v) { obj.put("youdaoBookName", v.trim()); persist() }
 }

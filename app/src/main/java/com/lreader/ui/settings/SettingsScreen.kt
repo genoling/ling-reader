@@ -323,6 +323,28 @@ fun SettingsScreen(onOpenAdmin: () -> Unit = {}) {
                 SyncSection(settings)
             }
 
+            // ---------- 有道生词本（登录自己的账号后同步生词） ----------
+            GroupHeader(
+                title = "同步到有道生词本",
+                summary = "登录有道账号 · 生词同步到有道 APP",
+                expanded = "youdao" in expandedGroups,
+                onToggle = { toggleGroup("youdao") }
+            )
+            if ("youdao" in expandedGroups) {
+                YoudaoSection(settings)
+            }
+
+            // ---------- 导出到有道单词本（本地生词 + 有道账号词 → 一份 XML） ----------
+            GroupHeader(
+                title = "导出到有道单词本",
+                summary = "本地生词 + 有道账号词 · 生成可导入的 XML",
+                expanded = "youdaoExport" in expandedGroups,
+                onToggle = { toggleGroup("youdaoExport") }
+            )
+            if ("youdaoExport" in expandedGroups) {
+                YoudaoExportSection(settings)
+            }
+
             // ---------- 本地词典（按需下载） ----------
             GroupHeader(
                 title = "本地词典",
