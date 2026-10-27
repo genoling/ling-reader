@@ -1,5 +1,6 @@
 package com.lreader.ui.vocab
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -43,8 +44,11 @@ import java.util.Locale
  * 交互规则：
  *  - 每张卡片出现时**自动朗读一次美音**；
  *  - 三个操作：**记得**（通过）、**不记得**（先跳过，排到队尾稍后再次出现）、**查看释义**（展开原句与详细解析）；
- *  - 进度 = 已掌握 / 本轮总数；
- *  - 只有「记得」才写入 SM-2 的正向进度，「不记得」按 grade 0 记录一次遗忘。
+ *  - 释义不必非点按钮：未展开时**点卡片任意处**同样展开（展开后不再整卡可点，避免滚动/阅读时误触收起）；
+ *  - 进度 = 今天背完的词数 / 本轮总数；
+ *  - **每个词当天要点两次「记得」才算背完**（[VocabRepository.KNOWN_PER_DAY]）：第一次只累计次数、
+ *    把词排到本轮队尾稍后再出现一次，第二次才写入 SM-2 正向进度并计入完成数；
+ *  - 只有「记得」才写入 SM-2 的正向进度，「不记得」按 grade 0 记录一次遗忘并把当天记得次数清零。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -68,6 +72,15 @@ fun ReviewScreen(
     var forgotTimes by remember { mutableStateOf(0) }
     var revealed by remember { mutableStateOf(false) }
     var ready by remember { mutableStateOf(false) }
+    /** 当前词今天已经点过几次「记得」（满 [VocabRepository.KNOWN_PER_DAY] 次才算今天背完） */
+    var todayKnown by remember { mutableStateOf(0) }
+    /**
+     * 卡片重新出现的序号。
+     *
+     * 同一个词今天只记得 1 次（或点了「不记得」）时会被排回队尾，再轮到时 `id` 没变，
+     * 只靠 `LaunchedEffect(current?.id)` 不会复位展开态、也不会重读，所以额外用这个计数当 key。
+     */
+    var cardToken by remember { mutableStateOf(0) }
 
     var dictEntry by remember { mutableStateOf<DictEntry?>(null) }
     var showMore by remember { mutableStateOf(false) }
@@ -97,12 +110,13 @@ fun ReviewScreen(
 
     val current = pending.firstOrNull()
 
-    // 卡片切换时：复位展开态 + 自动朗读一次美音 + 预取词典条目
-    LaunchedEffect(current?.id) {
+    // 卡片切换（或同一个词再次轮到）时：复位展开态 + 自动朗读一次美音 + 预取词典条目
+    LaunchedEffect(current?.id, cardToken) {
         val w = current ?: return@LaunchedEffect
         revealed = false
         dictEntry = null
         showMore = false
+        todayKnown = withContext(Dispatchers.IO) { repo.knownToday(w.id) }
         speech.accent = SpeechManager.Accent.US
         speech.speak(w.word)
         // 「详细解析」需要按词性分层展示，生词本里存的扁平文本做不到，故提前取词典 HTML
@@ -117,17 +131,27 @@ fun ReviewScreen(
 
     fun onKnown() {
         val w = current ?: return
+        // 每个词当天要「记得」两次才算背完：第一次只累计次数，把词排到队尾稍后再出现一次
+        if (repo.markKnown(w.id) < VocabRepository.KNOWN_PER_DAY) {
+            pending = pending.drop(1) + w
+            cardToken += 1
+            return
+        }
+        // 第二次：推进 SM-2 进度，并把这个词记为今天背完
         repo.review(w, ReviewGrade.KNOWN)
         mastered += 1
         pending = pending.drop(1)
+        cardToken += 1
     }
 
     fun onForgot() {
         val w = current ?: return
+        // review 会把当天的「记得」次数清零
         repo.review(w, ReviewGrade.FORGOT)
         forgotTimes += 1
         // 跳过该词，排到队尾，本轮后面还会再出现
         pending = pending.drop(1) + w
+        cardToken += 1
     }
 
     fun openFullEntry() {
@@ -175,6 +199,11 @@ fun ReviewScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Spacer(Modifier.weight(1f))
+                        Text(
+                            "每词需记得 ${VocabRepository.KNOWN_PER_DAY} 次",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                     Spacer(Modifier.height(6.dp))
                     ReviewCard(
@@ -182,6 +211,7 @@ fun ReviewScreen(
                         entry = dictEntry,
                         mastered = mastered,
                         total = total,
+                        todayKnown = todayKnown,
                         revealed = revealed,
                         onToggleReveal = { revealed = !revealed },
                         onMore = { openFullEntry() },
@@ -286,6 +316,8 @@ private fun ReviewCard(
     entry: DictEntry?,
     mastered: Int,
     total: Int,
+    /** 今天已经点过几次「记得」：>0 时提示「再记一次就完成」 */
+    todayKnown: Int,
     revealed: Boolean,
     onToggleReveal: () -> Unit,
     onMore: () -> Unit,
@@ -293,7 +325,17 @@ private fun ReviewCard(
     onSpeakUk: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Card(modifier, elevation = CardDefaults.cardElevation(3.dp)) {
+    // 未展开时整张卡片可点：点框框任意处即可展开释义。
+    // 展开后不再整卡可点，否则滚动看详情时手指一抬就会被当成「收起」。
+    val cardModifier = if (revealed) modifier else modifier.clickable(onClick = onToggleReveal)
+
+    val scrollState = rememberScrollState()
+    // 展开瞬间把卡片内容拉回顶部：整卡可点时焦点会转移到下面的详情，
+    // 触发「把焦点滚进可视区」，结果单词和「收起释义」都被顶到屏幕外。
+    LaunchedEffect(revealed) {
+        if (revealed) scrollState.scrollTo(0)
+    }
+    Card(cardModifier, elevation = CardDefaults.cardElevation(3.dp)) {
         Column(Modifier.fillMaxSize().padding(18.dp)) {
             // 进度 + 更多释义
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -310,7 +352,7 @@ private fun ReviewCard(
                 Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
+                    .verticalScroll(scrollState)
             ) {
                 Column(
                     Modifier.fillMaxWidth(),
@@ -327,6 +369,22 @@ private fun ReviewCard(
                     Row(horizontalArrangement = Arrangement.spacedBy(18.dp)) {
                         AccentPhonetic("英", word.phonetic, onSpeakUk)
                         AccentPhonetic("美", word.phonetic, onSpeakUs)
+                    }
+
+                    // 今天记得过一次又轮回来时，明确告诉用户「再来一次就完成」，避免以为没生效
+                    if (todayKnown > 0) {
+                        Spacer(Modifier.height(10.dp))
+                        Surface(
+                            shape = MaterialTheme.shapes.small,
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)
+                        ) {
+                            Text(
+                                "今天已记得 $todayKnown/${VocabRepository.KNOWN_PER_DAY} 次 · 再记一次就完成",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
                     }
 
                     Spacer(Modifier.height(22.dp))
@@ -605,7 +663,13 @@ private fun FinishedView(known: Int, total: Int, forgotTimes: Int, onBack: () ->
     ) {
         Text("本轮复习完成", fontSize = 24.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(10.dp))
-        Text("共 $total 个单词 · 记得 $known 个", fontSize = 14.sp)
+        Text("共 $total 个单词 · 今天背完 $known 个", fontSize = 14.sp)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "每个词今天点满 ${VocabRepository.KNOWN_PER_DAY} 次「记得」才算背完",
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
         if (forgotTimes > 0) {
             Spacer(Modifier.height(4.dp))
             Text(

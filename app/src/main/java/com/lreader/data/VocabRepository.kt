@@ -100,10 +100,15 @@ class VocabRepository(context: Context) {
     companion object {
         /**
          * 3：新增 `last_review_day`（每日复习刷新用）；
-         * 4：新增同步元数据 `uid` / `updated_at` / `deleted`（升级后自动回填 UUID）。
+         * 4：新增同步元数据 `uid` / `updated_at` / `deleted`（升级后自动回填 UUID）；
+         * 5：新增 `form`（正文里的变形词形）；
+         * 6：新增 `day_known`（当天已点「记得」的次数，满 2 次才算今天背完）。
          * 一律靠 ensureSchema 非破坏性补列。
          */
-        private const val DB_VERSION = 5
+        private const val DB_VERSION = 6
+
+        /** 同一个词当天要点满这么多次「记得」才算今天背完 */
+        const val KNOWN_PER_DAY = 2
 
         /**
          * 表结构唯一来源。新增字段直接追加，升级会自动补列。
@@ -131,6 +136,14 @@ class VocabRepository(context: Context) {
             "grade INTEGER DEFAULT 0",
             "next_review INTEGER",
             "last_review_day INTEGER DEFAULT 0",
+            /**
+             * 当天已点「记得」的次数（只在 `last_review_day` 当天有效，跨天视为 0）。
+             *
+             * 需求：**同一个词当天要点两次「记得」才算背完**，所以第一次只累加这一列，
+             * 第二次才走 [review] 推进 SM-2 并把当天任务标记完成。
+             * 「不记得」会把它清零。
+             */
+            "day_known INTEGER DEFAULT 0",
             "uid TEXT",
             "updated_at INTEGER DEFAULT 0",
             "deleted INTEGER DEFAULT 0"
@@ -358,19 +371,67 @@ class VocabRepository(context: Context) {
     }.timeInMillis
 
     /**
-     * 今天还**没背过**的词。
+     * 今天还**没背完**的词。
      *
-     * 每天 0 点自动刷新：不管 SM-2 间隔到没到，当天没背过的词都会重新进队列；
-     * 提交过评级的词当天不再出现，第二天再次全部出现。
+     * 每天 0 点自动刷新：不管 SM-2 间隔到没到，当天没背完的词都会重新进队列；
+     * 一个词当天要点满 [KNOWN_PER_DAY] 次「记得」（见 [markKnown]）才算背完，
+     * 背完的词当天不再出现，第二天再次全部出现。
      */
     fun todayPending(shuffle: Boolean = false): List<VocabWord> {
         val list = ArrayList<VocabWord>()
         val order = if (shuffle) "RANDOM()" else "next_review ASC"
         helper.readableDatabase.rawQuery(
-            "SELECT * FROM vocab WHERE deleted = 0 AND (last_review_day IS NULL OR last_review_day < ?) ORDER BY $order",
-            arrayOf(startOfToday().toString())
+            "SELECT * FROM vocab WHERE deleted = 0 " +
+                "AND (last_review_day IS NULL OR last_review_day < ? OR day_known < ?) " +
+                "ORDER BY $order",
+            arrayOf(startOfToday().toString(), KNOWN_PER_DAY.toString())
         ).use { c -> while (c.moveToNext()) list.add(read(c)) }
         return list
+    }
+
+    /**
+     * 今天已经点过几次「记得」（跨天自动归零）。
+     *
+     * 只用于界面上提示「今天已记得 1/2」，不参与 SM-2 计算。
+     */
+    fun knownToday(id: Long): Int {
+        var n = 0
+        var day = 0L
+        helper.readableDatabase.rawQuery(
+            "SELECT day_known, last_review_day FROM vocab WHERE id = ?", arrayOf(id.toString())
+        ).use { c ->
+            if (c.moveToFirst()) {
+                n = c.getInt(0)
+                day = c.getLong(1)
+            }
+        }
+        return if (day == startOfToday()) n else 0
+    }
+
+    /**
+     * 记一次「记得」，返回**今天累计**次数。
+     *
+     * 没满 [KNOWN_PER_DAY] 次时只累加 `day_known`、不动 SM-2 进度（今天还没背完）；
+     * 满次数后由调用方再走 [review] 推进间隔并标记当天完成。
+     */
+    fun markKnown(id: Long): Int {
+        val today = startOfToday()
+        var n = 1
+        helper.writableDatabase.rawQuery(
+            "SELECT day_known, last_review_day FROM vocab WHERE id = ?", arrayOf(id.toString())
+        ).use { c ->
+            if (c.moveToFirst()) {
+                val sameDay = c.getLong(1) == today
+                n = (if (sameDay) c.getInt(0) else 0) + 1
+            }
+        }
+        val cv = ContentValues().apply {
+            put("day_known", n)
+            put("last_review_day", today)
+            put("updated_at", System.currentTimeMillis())
+        }
+        helper.writableDatabase.update("vocab", cv, "id = ?", arrayOf(id.toString()))
+        return n
     }
 
     /** 今天需要复习的 */
@@ -455,6 +516,8 @@ class VocabRepository(context: Context) {
             put("next_review", nextReview)
             // 记录「今天已背过」，当天不再出现在复习队列
             put("last_review_day", startOfToday())
+            // 记得 → 记录已点满次数（当天算背完）；忘记 → 清零，还要重新点满才算完
+            put("day_known", if (g < 3) 0 else KNOWN_PER_DAY)
             put("updated_at", System.currentTimeMillis())
         }
         helper.writableDatabase.update("vocab", cv, "id = ?", arrayOf(w.id.toString()))

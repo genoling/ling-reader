@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.Palette
@@ -117,6 +118,8 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
     var tocList by remember { mutableStateOf<List<TocEntry>>(emptyList()) }
     /** 跨设备同步来的章内百分比（<0 = 不用）；页码无效时按它定位 */
     var restorePercent by remember { mutableStateOf(-1f) }
+    /** 首次进入本书时，在恢复的那一页上醒目提示「上次读到这里」；任意点击后消失 */
+    var showResumeHint by remember { mutableStateOf(false) }
 
     // 查词
     var selectedWord by remember { mutableStateOf<String?>(null) }
@@ -146,6 +149,9 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
             // 用 <0 而非 <=0：lastScrollY=0 是合法的「第 1 页」，不能误当「无页码」去触发百分比定位
             //（否则第 1 页的进度会被偏移到第 2 页）
             restorePercent = if (b.lastScrollY < 0 && b.lastPercent > 0f) b.lastPercent else -1f
+            // 有上次进度 → 打开后先醒目提示「上次读到这里」，用户点一下屏幕才消失。
+            // lastScrollY 为 -1 是云同步的哨兵值（进度来自别的设备），同样算「有进度」
+            showResumeHint = b.lastChapterIndex > 0 || b.lastScrollY != 0 || b.lastPercent > 0f
             // 目录（含层级），与章节用同一份解析结果，避免点击后跳错章
             tocList = BookParser.loadToc(b, chapters)
         }
@@ -279,7 +285,21 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
             }
         }
     ) { padding ->
-        Box(Modifier.padding(padding).fillMaxSize().background(theme.background)) {
+        Box(
+            Modifier
+                .padding(padding)
+                .fillMaxSize()
+                .background(theme.background)
+                // 「上次读到这里」提示：用户一碰屏幕（点词/翻页都算）就消失。
+                // requireUnconsumed = false 且不消费事件，所以不会挡住正文里的点击与滑动。
+                .pointerInput(showResumeHint) {
+                    if (!showResumeHint) return@pointerInput
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false)
+                        showResumeHint = false
+                    }
+                }
+        ) {
             when {
                 loading -> CircularProgressIndicator(Modifier.align(Alignment.Center))
 
@@ -374,6 +394,17 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
                             translating = false
                         }
                     }
+                )
+            }
+
+            // 首次进入本书：在恢复的那一页上醒目提示「上次读到这里」，点一下屏幕就消失
+            if (showResumeHint && chapters.isNotEmpty() && pages.isNotEmpty()) {
+                ResumeHint(
+                    chapter = chapterIndex,
+                    chapterCount = chapters.size,
+                    page = pageIndex,
+                    pageCount = pages.size,
+                    modifier = Modifier.align(Alignment.TopCenter).padding(top = 10.dp)
                 )
             }
 
@@ -1623,6 +1654,49 @@ private fun StatChip(label: String, value: String) {
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+        }
+    }
+}
+
+/**
+ * 「上次读到这里」的醒目提示条。
+ *
+ * 只在刚打开书、恢复到上次进度时出现一次，用户碰一下屏幕就消失（见 ReaderScreen 里的 pointerInput）。
+ */
+@Composable
+private fun ResumeHint(
+    chapter: Int,
+    chapterCount: Int,
+    page: Int,
+    pageCount: Int,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.primary,
+        contentColor = MaterialTheme.colorScheme.onPrimary,
+        shadowElevation = 8.dp
+    ) {
+        Row(
+            Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                Icons.Filled.Bookmark,
+                contentDescription = null,
+                modifier = Modifier.size(20.dp)
+            )
+            Spacer(Modifier.width(10.dp))
+            Column {
+                Text("上次读到这里", fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    "第 ${chapter + 1}/${chapterCount.coerceAtLeast(1)} 章 · " +
+                        "第 ${page + 1}/${pageCount.coerceAtLeast(1)} 页 · 点击屏幕继续",
+                    fontSize = 11.sp
+                )
+            }
         }
     }
 }
