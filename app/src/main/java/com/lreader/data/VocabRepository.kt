@@ -184,6 +184,10 @@ class VocabRepository(context: Context) {
             rememberForm(w.word, form)
             return false
         }
+        // 注意：contains() 只看 deleted = 0 的行，而表上有 UNIQUE(word, sentence)。
+        // 若库里还留着一行**同词同句、已软删除**的记录（生词本里删过、或云同步把别处的
+        // 删除合并进来），contains 认为「没有这个词」，insert 却撞唯一约束返回 -1，
+        // 界面上就是「点了 + 毫无反应、这个词再也加不回来」。见下面的复活逻辑。
         val cv = ContentValues().apply {
             put("word", w.word)
             put("form", cleanForm(form, w.word))
@@ -203,7 +207,14 @@ class VocabRepository(context: Context) {
             put("updated_at", now)
             put("deleted", 0)
         }
-        return helper.writableDatabase.insert("vocab", null, cv) > 0
+        val db = helper.writableDatabase
+        if (db.insert("vocab", null, cv) > 0) return true
+        // 插入被唯一约束挡下：把那条已软删除的旧行「复活」为本次内容（复习进度重置），
+        // 否则同一个词在同一句话里永远加不进生词本。
+        return db.update(
+            "vocab", cv, "word = ? AND COALESCE(sentence, '') = ? AND deleted = 1",
+            arrayOf(w.word, w.sentence)
+        ) > 0
     }
 
     /** 词形规范化：小写、去空白；与原形相同则不存（省一列冗余） */
