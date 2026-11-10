@@ -2,6 +2,7 @@ package com.lreader.ui.reader
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.widget.Toast
 import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
@@ -210,7 +211,15 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
         saveProgress()
     }
     DisposableEffect(Unit) {
-        onDispose { saveProgress() }
+        // 发音彻底失败（在线兜底也拿不到音频，如词库里没有该词）时给个提示：
+        // 阅读页原来完全不接这个回调，用户看到的就是「点了某个词毫无反应」。
+        speech.onOnlineError = { word ->
+            Toast.makeText(context, "「$word」没有可用的发音音频", Toast.LENGTH_SHORT).show()
+        }
+        onDispose {
+            speech.onOnlineError = null
+            saveProgress()
+        }
     }
 
     Scaffold(
@@ -1040,6 +1049,38 @@ private sealed interface PageBlock {
 private data class ReaderPage(val blocks: List<PageBlock>)
 
 /**
+ * 按页序把文本块拼成整章可读文本，**并给不同段落之间补一个 `'\n'`**；同时返回各块起始偏移。
+ *
+ * 为什么必须补这个换行：`sentenceOf` 只在 `. ! ? 换行` 处断句，块与块之间若直接首尾相接，
+ * 长按正文第一句时回扫就没有任何边界，会一路越过本段、导语、标题、栏目行，直到本章第一个句点 ——
+ * 用户看到的就是「第一句和标题连在一起翻译」（2026-11-10 反馈）。
+ *
+ * 同一段被页边界切开的后续片 `startsParagraph = false`，仍然直接相接，
+ * 这样「跨页句子补全」不受影响（2026-09-26 需求）。
+ */
+private fun joinTextBlocks(pages: List<ReaderPage>): Pair<String, Map<Pair<Int, Int>, Int>> {
+    val sb = StringBuilder()
+    val offsets = HashMap<Pair<Int, Int>, Int>()
+    var acc = 0
+    var first = true
+    pages.forEachIndexed { pi, page ->
+        page.blocks.forEachIndexed { bi, block ->
+            if (block is PageBlock.Text) {
+                if (!first && block.startsParagraph) {
+                    sb.append('\n')
+                    acc += 1
+                }
+                offsets[pi to bi] = acc
+                sb.append(block.text)
+                acc += block.text.length
+                first = false
+            }
+        }
+    }
+    return sb.toString() to offsets
+}
+
+/**
  * 图文混排分页：按像素高度把「文字块 + 插图」装进一页，装不下就换页。
  *
  * 文字块带层级（见 [BlockKind]），每块按**自己的行高**累加占位，因此标题行更大。
@@ -1284,29 +1325,8 @@ private fun PagedReader(
             // 首帧就渲染末页：分页是异步的，定位只能发生在分页之后，若这一帧仍按 idx(=0) 渲染，
             // 就会先闪一下「本章开头」再跳到末尾；pendingEnd 期间直接用末页作为显示页即可避免
             val renderIdx = if (pendingEnd) pages.lastIndex else idx
-            // 整章可读文本（按页序拼接所有文本块）：跨页的句子在原文里是连续的，
-            // 长按翻译时用它把被页边界切断的句子补全（用户 2026-09-26 需求）
-            val fullText = remember(pages) {
-                buildString {
-                    pages.forEach { p ->
-                        p.blocks.forEach { b -> if (b is PageBlock.Text) append(b.text) }
-                    }
-                }
-            }
-            // 每个文本块在 fullText 里的起始偏移：(页序号 to 块序号) -> 偏移
-            val blockOffsets = remember(pages) {
-                val m = HashMap<Pair<Int, Int>, Int>()
-                var acc = 0
-                pages.forEachIndexed { pi, p ->
-                    p.blocks.forEachIndexed { bi, b ->
-                        if (b is PageBlock.Text) {
-                            m[pi to bi] = acc
-                            acc += b.text.length
-                        }
-                    }
-                }
-                m
-            }
+            // 整章可读文本 + 每个文本块在其中的起始偏移：(页序号 to 块序号) -> 偏移
+            val (fullText, blockOffsets) = remember(pages) { joinTextBlocks(pages) }
             // 分页是异步的：页数就绪后再校正定位
             LaunchedEffect(pages.size) {
                 if (pages.isEmpty()) return@LaunchedEffect

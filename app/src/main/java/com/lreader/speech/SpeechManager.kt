@@ -452,8 +452,24 @@ class SpeechManager private constructor(context: Context) {
         }
     }
 
+    /**
+     * 下载发音 mp3：**先试用户选择的口音，失败再换另一个口音**。
+     *
+     * 有道的两个口音库并非词条全覆盖 —— 实测 `paydirt` 美音接口返回 500、英音返回 200（20KB），
+     * 只用单一口音就会表现为「个别词点了完全没声音」（用户 2026-11-10 反馈）。
+     * 另一个口音能出音就先给它，音色差异总好过没声音。
+     */
     private fun download(text: String, file: File): Boolean {
-        val url = ONLINE_BASE + URLEncoder.encode(text, "UTF-8") + "&type=" + accent.youdaoType
+        val order = if (accent == Accent.US) listOf(Accent.US, Accent.UK) else listOf(Accent.UK, Accent.US)
+        for (a in order) {
+            if (fetch(text, a, file)) return true
+        }
+        return false
+    }
+
+    /** 按指定口音取一次；HTTP 200 且体积合理才落盘 */
+    private fun fetch(text: String, a: Accent, file: File): Boolean {
+        val url = ONLINE_BASE + URLEncoder.encode(text, "UTF-8") + "&type=" + a.youdaoType
         return runCatching {
             val conn = (URL(url).openConnection() as HttpURLConnection).apply {
                 connectTimeout = 5000
