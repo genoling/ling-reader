@@ -24,6 +24,7 @@ import com.lreader.analysis.WordAnalysis
 import com.lreader.data.SettingsStore
 import com.lreader.data.VocabRepository
 import com.lreader.dict.DictDatabase
+import com.lreader.dict.OnlineDict
 import com.lreader.model.DictEntry
 import com.lreader.model.ReviewGrade
 import com.lreader.model.TranslationResult
@@ -120,7 +121,12 @@ fun ReviewScreen(
         speech.accent = SpeechManager.Accent.US
         speech.speak(w.word)
         // 「详细解析」需要按词性分层展示，生词本里存的扁平文本做不到，故提前取词典 HTML
-        dictEntry = withContext(Dispatchers.IO) { dict.lookup(w.word) }
+        // 本地查空 → 有道在线兜底，否则这类词点「详细解析」只有一句「未收录」
+        dictEntry = OnlineDict.lookupOrLocal(
+            context,
+            withContext(Dispatchers.IO) { dict.lookup(w.word) },
+            w.word
+        )
     }
 
     fun speakWith(accent: SpeechManager.Accent) {
@@ -161,7 +167,11 @@ fun ReviewScreen(
             return
         }
         scope.launch {
-            dictEntry = withContext(Dispatchers.IO) { dict.lookup(w.word) }
+            dictEntry = OnlineDict.lookupOrLocal(
+                context,
+                withContext(Dispatchers.IO) { dict.lookup(w.word) },
+                w.word
+            )
             showMore = true
         }
     }

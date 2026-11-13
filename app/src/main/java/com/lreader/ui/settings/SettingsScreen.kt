@@ -867,14 +867,16 @@ fun SettingsScreen(onOpenAdmin: () -> Unit = {}) {
                                 fontWeight = FontWeight.Medium,
                                 color = MaterialTheme.colorScheme.primary
                             )
+                            // notes 已在 UpdateRepository 里压成纯文本（无 markdown 符号、最多 3 行），
+                            // 这里只需保证不被折行挤爆：最多 4 行 + 省略号
                             val notes = newRelease!!.notes
                             if (notes.isNotBlank()) {
                                 Spacer(Modifier.height(4.dp))
                                 Text(
                                     notes,
-                                    fontSize = 11.sp,
-                                    lineHeight = 16.sp,
-                                    maxLines = 6,
+                                    fontSize = 12.sp,
+                                    lineHeight = 17.sp,
+                                    maxLines = 4,
                                     overflow = TextOverflow.Ellipsis,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )

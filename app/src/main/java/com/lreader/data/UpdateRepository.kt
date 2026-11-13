@@ -48,6 +48,84 @@ class UpdateRepository(private val context: Context) {
             "https://ghproxy.net/https://api.github.com/repos/$REPO/releases/latest"
         )
 
+        /**
+         * 把 GitHub Release 的 Markdown 正文压成**简洁纯文本**更新说明。
+         *
+         * 弹层空间有限，raw markdown 显示出来全是符号噪声（`**修复**`、`- **xxx**：yyy`、
+         * `` `code` ``、「引号」），用户 2026-11-13 反馈「更新内容不够简洁、不要有这些符号」。
+         * 这里统一去掉标题/加粗/列表/链接/引号/反引号，最长 [maxLines] 行、每行 [lineMax] 字。
+         */
+        fun cleanNotes(body: String, maxLines: Int = 3, lineMax: Int = 40): String {
+            // ① 先按块合并：Markdown 里一个条目的长句会折成多行（缩进续行），
+            //    直接逐行处理会把续行当成新条目。空行或新的列表项/标题才算新块。
+            val blocks = ArrayList<String>()
+            val sb = StringBuilder()
+            fun flush() {
+                val t = sb.toString().trim()
+                if (t.isNotEmpty()) blocks.add(t)
+                sb.setLength(0)
+            }
+            for (raw in body.lines()) {
+                val t = raw.trim()
+                if (t.isEmpty()) {
+                    flush()
+                    continue
+                }
+                if (t.startsWith("#") || t.startsWith("- ") || t.startsWith("* ") ||
+                    t.startsWith("+ ") || t.startsWith("> ")
+                ) flush()
+                sb.append(t).append(' ')
+            }
+            flush()
+
+            // ② 去掉 markdown 记号与引号，只留文字
+            val cleaned = blocks.map { b ->
+                b.replace(Regex("^[-*+>]\\s*"), "")
+                    .replace(Regex("\\[([^\\]]+)]\\([^)]*\\)"), "$1")
+                    .replace("**", "").replace("__", "").replace("`", "")
+                    .replace(Regex("[*#>|]"), " ")
+                    .replace(Regex("[\u201c\u201d\u2018\u2019\"'\u300c\u300d\u300e\u300f]"), "")
+                    .replace(Regex("\\s+"), " ")
+                    .trim()
+            }
+            val picked = cleaned
+                .filter { it.isNotEmpty() }
+                // 「LingReader v1.6.5」「1.6.7 - 2026-11-13」这类标题行不展示：
+                // 卡片标题上已经有版本号了，再列一条只会占掉一行位置
+                .filterNot {
+                    Regex(
+                        "^(lingreader\\s*)?v?\\d+\\.\\d+(\\.\\d+)?(\\s*[-–]\\s*\\d{4}-\\d{2}-\\d{2})?$",
+                        RegexOption.IGNORE_CASE
+                    ).matches(it)
+                }
+                // 「修复 / 改进 / 新增」这类占一行的分组标题也去掉，只留具体条目
+                .filterNot { it.length <= 4 && !it.contains(Regex("[。，,.：:；;…]")) }
+                .take(maxLines)
+
+            // 两条以上才编号（只有一句时加「1.」反而怪）
+            val numbered = picked.size >= 2
+            return picked.mapIndexed { i, s ->
+                val prefix = if (numbered) "${i + 1}. " else ""
+                prefix + clip(s, lineMax - prefix.length)
+            }.joinToString("\n")
+        }
+
+        /**
+         * 单行收敛：条目通常是「现象：原因/做法」或「甲；乙」的结构，
+         * 截到冒号/句号/分号处就是一句能看懂的话，比硬截断乱切词好得多。
+         */
+        private fun clip(line: String, max: Int): String {
+            var s = line
+            val colon = s.indexOfFirst { it == '：' || it == ':' }
+            val stop = s.indexOfFirst { it == '。' || it == '；' || it == ';' }
+            s = when {
+                colon in 6 until max -> s.substring(0, colon)
+                stop in 6 until max -> s.substring(0, stop)
+                else -> s
+            }
+            return if (s.length > max) s.take(max).trimEnd('，', '、', '：', ':', ' ') + "…" else s
+        }
+
         /** 逐段比较版本号：`1.10.0` > `1.9.2` */
         fun isNewer(latest: String, current: String): Boolean {
             fun parts(s: String) = Regex("\\d+").findAll(s).map { it.value.toIntOrNull() ?: 0 }.toList()
@@ -144,7 +222,8 @@ class UpdateRepository(private val context: Context) {
                 return@withContext Result.success(
                     ReleaseInfo(
                         version = tag,
-                        notes = o.optString("body").trim(),
+                        // 弹层只放得下几行：Markdown 原样显示全是符号，先压成纯文本
+                        notes = cleanNotes(o.optString("body")),
                         apkUrl = apkUrl,
                         pageUrl = o.optString("html_url"),
                         sizeBytes = size

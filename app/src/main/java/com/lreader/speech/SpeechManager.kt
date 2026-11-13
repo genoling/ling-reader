@@ -433,38 +433,89 @@ class SpeechManager private constructor(context: Context) {
     private fun speakOnline(text: String) {
         mode = Mode.ONLINE
         val dir = File(appContext.cacheDir, ONLINE_DIR)
-        val key = Integer.toHexString("${text.lowercase()}|${accent.name}".hashCode())
-        val file = File(dir, "$key.mp3")
 
         worker.execute {
-            if (!file.exists() || file.length() < 512) {
-                if (!dir.exists() && !dir.mkdirs()) {
-                    Log.e(TAG, "无法创建发音缓存目录")
-                    main.post { onOnlineError?.invoke(text) }
-                    return@execute
+            if (!dir.exists() && !dir.mkdirs()) {
+                Log.e(TAG, "无法创建发音缓存目录")
+                main.post { onOnlineError?.invoke(text) }
+                return@execute
+            }
+
+            // 1) 整词（含词形变体）能拿到音频就整词播
+            val whole = cacheFileFor(dir, text)
+            if ((whole.exists() && whole.length() >= 512) || download(text, whole)) {
+                main.post { playAll(listOf(whole), text) }
+                return@execute
+            }
+
+            // 2) 词库里没有的复合词（ladder-climbing / data-centre 等整词两种口音都 500）
+            //    → 按连字符/空格拆成单词，逐段取音频后顺序播放
+            val parts = splitParts(text)
+            if (parts.size >= 2) {
+                val files = parts.mapNotNull { p ->
+                    val f = cacheFileFor(dir, p)
+                    if ((f.exists() && f.length() >= 512) || download(p, f)) f else null
                 }
-                if (!download(text, file)) {
-                    main.post { onOnlineError?.invoke(text) }
+                if (files.size == parts.size) {
+                    Log.i(TAG, "复合词分段发音：$text → ${parts.joinToString("+")}")
+                    main.post { playAll(files, text) }
                     return@execute
                 }
             }
-            main.post { play(file) }
+
+            main.post { onOnlineError?.invoke(text) }
         }
     }
 
+    /** 缓存文件：词 + 当前口音 → 稳定的文件名（口音不同各存一份） */
+    private fun cacheFileFor(dir: File, text: String): File {
+        val key = Integer.toHexString("${text.lowercase()}|${accent.name}".hashCode())
+        return File(dir, "$key.mp3")
+    }
+
     /**
-     * 下载发音 mp3：**先试用户选择的口音，失败再换另一个口音**。
+     * 把复合词拆成可单独取音频的单词：`ladder-climbing` → [ladder, climbing]。
+     * 单字母段（如 `COVID-19` 的 19 之外的 a）太短没有音频，直接丢掉。
+     */
+    private fun splitParts(text: String): List<String> =
+        text.split('-', ' ', '\u2019', '\'', '/', '\u2013', '\u2014')
+            .map { it.trim() }
+            .filter { it.length >= 2 }
+            .distinct()
+
+    /**
+     * 下载发音 mp3：先按原词试两个口音，再按**连字符变体**试一遍。
      *
      * 有道的两个口音库并非词条全覆盖 —— 实测 `paydirt` 美音接口返回 500、英音返回 200（20KB），
      * 只用单一口音就会表现为「个别词点了完全没声音」（用户 2026-11-10 反馈）。
-     * 另一个口音能出音就先给它，音色差异总好过没声音。
+     *
+     * 更要紧的是**连字符复合词**：`data-centre`、`national-security` 两种口音都返回 500，
+     * 而 `data centre`（空格形式）两者都是 200 —— 原来只按原词形请求，
+     * 于是「先弹一次没音频的提示、稍后（换词形/重试时）又出声」（用户 2026-11-13 反馈）。
+     * 现在把空格形式一并作为候选，这类词一次就出声，不会再弹提示。
      */
     private fun download(text: String, file: File): Boolean {
-        val order = if (accent == Accent.US) listOf(Accent.US, Accent.UK) else listOf(Accent.UK, Accent.US)
-        for (a in order) {
-            if (fetch(text, a, file)) return true
+        val accents = if (accent == Accent.US) listOf(Accent.US, Accent.UK) else listOf(Accent.UK, Accent.US)
+        for (v in variantsOf(text)) {
+            for (a in accents) {
+                if (fetch(v, a, file)) return true
+            }
         }
         return false
+    }
+
+    /**
+     * 在线发音的候选词形：原词 → 连字符换空格 → 去掉连字符。
+     * 有道 dictvoice 认得 `data centre`，不认 `data-centre`。
+     */
+    private fun variantsOf(text: String): List<String> {
+        val out = LinkedHashSet<String>()
+        out.add(text)
+        if (text.contains('-')) {
+            out.add(text.replace('-', ' '))
+            out.add(text.replace("-", ""))
+        }
+        return out.filter { it.isNotBlank() }
     }
 
     /** 按指定口音取一次；HTTP 200 且体积合理才落盘 */
@@ -494,7 +545,22 @@ class SpeechManager private constructor(context: Context) {
         }
     }
 
-    private fun play(file: File) {
+    /** 在线发音待播队列（只在主线程读写）：复合词分段发音时一段接一段 */
+    private val playQueue = ArrayDeque<File>()
+
+    /** 顺序播放若干段音频 */
+    private fun playAll(files: List<File>, text: String) {
+        playQueue.clear()
+        playQueue.addAll(files)
+        playNext(text)
+    }
+
+    private fun playNext(text: String) {
+        val f = playQueue.removeFirstOrNull() ?: return
+        play(f, text) { playNext(text) }
+    }
+
+    private fun play(file: File, text: String, onDone: (() -> Unit)? = null) {
         runCatching { player?.release() }
         player = null
         runCatching {
@@ -503,11 +569,14 @@ class SpeechManager private constructor(context: Context) {
                 setOnCompletionListener { mp ->
                     mp.release()
                     if (player === mp) player = null
+                    onDone?.invoke()
                 }
                 setOnErrorListener { mp, what, extra ->
                     Log.e(TAG, "MediaPlayer onError what=$what extra=$extra")
                     mp.release()
                     if (player === mp) player = null
+                    // 这一段解不出来就跳到下一段，别让整句哑掉
+                    onDone?.invoke()
                     true
                 }
                 prepare()
@@ -518,7 +587,7 @@ class SpeechManager private constructor(context: Context) {
             Log.e(TAG, "在线发音播放失败", it)
             runCatching { player?.release() }
             player = null
-            onOnlineError?.invoke(file.nameWithoutExtension)
+            onOnlineError?.invoke(text)
         }
     }
 
@@ -528,6 +597,7 @@ class SpeechManager private constructor(context: Context) {
         runCatching { player?.stop() }
         runCatching { player?.release() }
         player = null
+        playQueue.clear()
         pendingWord = null
     }
 

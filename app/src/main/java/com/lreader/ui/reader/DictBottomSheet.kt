@@ -43,6 +43,12 @@ fun DictBottomSheet(
     done: Boolean,
     /** 主词典是否已下载：未下载时「查不到」要明说原因，而不是误导成「未收录」 */
     dictInstalled: Boolean = true,
+    /** 本地查空、正在查有道在线 */
+    onlineLoading: Boolean = false,
+    /** 当前 [entry] 的释义来自在线兜底，需要注明出处 */
+    onlineSource: Boolean = false,
+    /** 在线兜底已经返回（null = 也没查到） */
+    onlineSearched: Boolean = false,
     sourceBook: String,
     inVocab: Boolean,
     onSpeak: () -> Unit,
@@ -150,6 +156,16 @@ fun DictBottomSheet(
                 )
             }
 
+            // 在线兜底命中：必须注明出处，别让用户以为本地词典收了这个词
+            if (onlineSource) {
+                Text(
+                    "本地词典未收录，以下释义来自有道在线",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 6.dp)
+                )
+            }
+
             Spacer(Modifier.height(6.dp))
             Divider()
             Spacer(Modifier.height(6.dp))
@@ -169,11 +185,25 @@ fun DictBottomSheet(
                     verticalArrangement = Arrangement.Center,
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Text(
-                        if (dictInstalled) "未收录该单词" else "本地词典未下载",
-                        fontSize = 14.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    if (onlineLoading) {
+                        CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.height(12.dp))
+                        Text(
+                            "本地词典未收录，正在查询有道在线…",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    } else {
+                        Text(
+                            when {
+                                !dictInstalled -> "本地词典未下载"
+                                onlineSearched -> "未收录该单词，在线词典也没有查到"
+                                else -> "未收录该单词"
+                            },
+                            fontSize = 14.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                     if (!dictInstalled) {
                         Spacer(Modifier.height(6.dp))
                         Text(

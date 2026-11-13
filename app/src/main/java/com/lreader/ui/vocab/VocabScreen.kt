@@ -28,6 +28,7 @@ import com.lreader.analysis.WordAnalysis
 import com.lreader.data.SettingsStore
 import com.lreader.data.VocabRepository
 import com.lreader.dict.DictDatabase
+import com.lreader.dict.OnlineDict
 import com.lreader.export.VocabExporter
 import com.lreader.export.VocabImporter
 import com.lreader.model.DictEntry
@@ -162,7 +163,8 @@ fun VocabScreen(
         speech.speak(w.word)
         scope.launch {
             detailEntry = withContext(Dispatchers.IO) {
-                if (dict.ensureReady()) dict.lookup(w.word) else null
+                // 本地查空 → 有道在线兜底（生词本里可能有 national-security 这类复合词）
+                OnlineDict.lookupOrLocal(context, if (dict.ensureReady()) dict.lookup(w.word) else null, w.word)
             }
             detailLoading = false
             // 顺手把原句译文取回来（失败就留空，弹层会提示）

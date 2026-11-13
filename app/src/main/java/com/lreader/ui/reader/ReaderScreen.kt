@@ -2,7 +2,6 @@ package com.lreader.ui.reader
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.widget.Toast
 import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
@@ -58,6 +57,7 @@ import com.lreader.data.SettingsStore
 import com.lreader.data.VocabRepository
 import com.lreader.dict.DictDatabase
 import com.lreader.dict.LevelDictionary
+import com.lreader.dict.OnlineDict
 import com.lreader.model.Book
 import com.lreader.model.Chapter
 import com.lreader.model.ChapterImage
@@ -127,6 +127,10 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
     var selectedSentence by remember { mutableStateOf("") }
     var dictEntry by remember { mutableStateOf<DictEntry?>(null) }
     var lookupDone by remember { mutableStateOf(false) }
+    // 本地词典查空时的在线兜底状态（有道）
+    var onlineLoading by remember { mutableStateOf(false) }
+    var onlineSource by remember { mutableStateOf(false) }
+    var onlineSearched by remember { mutableStateOf(false) }
 
     // 翻译
     var translating by remember { mutableStateOf(false) }
@@ -211,15 +215,10 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
         saveProgress()
     }
     DisposableEffect(Unit) {
-        // 发音彻底失败（在线兜底也拿不到音频，如词库里没有该词）时给个提示：
-        // 阅读页原来完全不接这个回调，用户看到的就是「点了某个词毫无反应」。
-        speech.onOnlineError = { word ->
-            Toast.makeText(context, "「$word」没有可用的发音音频", Toast.LENGTH_SHORT).show()
-        }
-        onDispose {
-            speech.onOnlineError = null
-            saveProgress()
-        }
+        // 阅读页不再为「没音频」弹提示（用户 2026-11-13：不要用弹窗解决发音问题）：
+        // 复合词已改为拆词分段发音，个别词形实在没有音频就静默跳过。
+        speech.onOnlineError = null
+        onDispose { saveProgress() }
     }
 
     Scaffold(
@@ -384,11 +383,30 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
                         selectedSentence = sentence
                         dictEntry = null
                         lookupDone = false
+                        onlineLoading = false
+                        onlineSource = false
+                        onlineSearched = false
                         translation = null
                         scope.launch {
                             val e = withContext(Dispatchers.IO) { dict.lookup(word, levels) }
+                            // 本地查空（如 national-security 这类复合词）→ 有道在线兜底，
+                            // 否则弹层只会给一句「未收录该单词」，一个中文释义都没有。
+                            // 词典没下载时不做兜底：那种情况下弹层该引导用户去下载，
+                            // 而不是把每一个词都偷偷发到线上。
+                            val miss = dictInstalled && (e == null || e.html.isBlank())
+                            // 先置 loading 再置 done，避免中间闪过一帧「未收录该单词」
+                            onlineLoading = miss
                             dictEntry = e
                             lookupDone = true
+                            if (miss) {
+                                val online = OnlineDict.lookup(context, word)
+                                onlineLoading = false
+                                onlineSearched = true
+                                if (online != null) {
+                                    dictEntry = online
+                                    onlineSource = true
+                                }
+                            }
                         }
                     },
                     onLongPressSentence = { sentence ->
@@ -491,8 +509,12 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
             entry = dictEntry,
             done = lookupDone,
             dictInstalled = dictInstalled,
+            onlineLoading = onlineLoading,
+            onlineSource = onlineSource,
+            onlineSearched = onlineSearched,
             sourceBook = book?.title ?: "",
-            inVocab = vocabWords.contains((dictEntry?.word ?: w).lowercase()),
+            inVocab = vocabWords.contains(w.lowercase()) ||
+                vocabWords.contains((dictEntry?.word ?: w).lowercase()),
             onSpeak = { speech.speak(dictEntry?.word ?: w) },
             onRemoveVocab = {
                 val target = dictEntry?.word ?: w

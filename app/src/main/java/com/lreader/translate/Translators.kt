@@ -1,5 +1,6 @@
 package com.lreader.translate
 
+import android.util.Log
 import com.lreader.model.TranslationResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -289,17 +290,55 @@ class FreeWebTranslator : TranslationEngine {
                 "MyMemory" to { myMemory(text, from, to) },
                 "Google" to { google(text, from, to) }
             )
+            // 三个源都不理想时，至少返回第一个非空译文（总比「翻译失败」好）
+            var fallback: String? = null
             providers.forEach { (name, call) ->
                 try {
                     val out = call()?.trim()
-                    if (!out.isNullOrBlank()) return@withContext ok(text, out, displayName)
-                    errors.add("$name 返回空译文")
+                    if (out.isNullOrBlank()) {
+                        errors.add("$name 返回空译文")
+                        return@forEach
+                    }
+                    if (fallback == null) fallback = out
+                    // 有道免费接口在带引号/撇号的句子上会「吃掉半个词」再吐出来：
+                    // `as a “bad talking-point”` → 「作为b糟糕的话题点」「利用b他的政府」。
+                    // 这种残缺译文不能直接用，换下一个源重试（实测 MyMemory 对同一句是完整的）。
+                    if (looksBroken(out, to)) {
+                        Log.w(TAG, "译文残缺，换源重试：$name → ${out.take(40)}")
+                        errors.add("$name 译文残缺")
+                        return@forEach
+                    }
+                    return@withContext ok(text, out, engineLabel(name))
                 } catch (e: Exception) {
                     errors.add("$name ${e.message ?: e.javaClass.simpleName}")
                 }
             }
+            fallback?.let { return@withContext ok(text, it, displayName) }
             fail(text, displayName, "免费翻译接口暂时不可用（${errors.joinToString("；")}）")
         }
+
+    /** 译文实际出自哪个源：UI 上「引擎：…」要如实显示，别让用户以为都是有道翻的 */
+    private fun engineLabel(provider: String) =
+        if (provider == "有道") displayName else "免费在线 · $provider"
+
+    /**
+     * 译文是否明显残缺：
+     * 1. 汉字中间夹 1~2 个**小写**拉丁字母（`利用b他的政府`）—— 免费接口的典型残缺。
+     *    限定小写：`维生素C含量` 这类正常译文里的大写单字母不能被误判；
+     * 2. 目标语言是中文却一个汉字都没有（等于没翻）。
+     */
+    private fun looksBroken(out: String, to: String): Boolean {
+        if (STRAY_LATIN.containsMatchIn(out)) return true
+        if (to.lowercase().startsWith("zh") && out.none { it.code in 0x4E00..0x9FFF }) return true
+        return false
+    }
+
+    private companion object {
+        const val TAG = "FreeWebTranslator"
+
+        /** 汉字 + 1~2 个小写拉丁字母 + 汉字 */
+        val STRAY_LATIN = Regex("[\\u4e00-\\u9fff][a-z]{1,2}[\\u4e00-\\u9fff]")
+    }
 
     /** 有道智云体验接口，返回 JSON 的 translation 数组 */
     private fun youdao(text: String, from: String, to: String): String {
