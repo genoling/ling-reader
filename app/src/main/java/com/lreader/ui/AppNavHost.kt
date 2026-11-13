@@ -12,9 +12,12 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavHostController
@@ -24,12 +27,14 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.lreader.data.UpdateController
 import com.lreader.ui.admin.AdminScreen
 import com.lreader.ui.magazine.MagazineScreen
 import com.lreader.ui.reader.ReaderScreen
 import com.lreader.ui.settings.SettingsScreen
 import com.lreader.ui.shelf.ShelfScreen
 import com.lreader.ui.study.StudyScreen
+import com.lreader.ui.update.UpdatePromptDialog
 
 object Routes {
     const val SHELF = "shelf"
@@ -57,6 +62,12 @@ fun AppNavHost() {
     val entry by nav.currentBackStackEntryAsState()
     val currentRoute = entry?.destination?.route
     val showBar = BottomTab.values().any { it.route == currentRoute }
+
+    // 启动时检查新版本：24 小时节流 / 首日静默 / 开关判断都在 controller 里做，
+    // 这里只是在进 App 时问一次（进程内重复进入不会重复请求）
+    val context = LocalContext.current
+    val update = remember { UpdateController.get(context) }
+    LaunchedEffect(Unit) { update.checkOnLaunch() }
 
     Scaffold(
         bottomBar = {
@@ -116,6 +127,10 @@ fun AppNavHost() {
 
         }
     }
+
+    // 阅读页里先挂起：不打断阅读，等回到 Tab 页再弹
+    val inReader = currentRoute?.startsWith(Routes.READER) == true
+    if (update.prompt != null && !inReader) UpdatePromptDialog(update)
 }
 
 /** Tab 之间切换：保留各 Tab 的滚动位置，且不堆栈 */

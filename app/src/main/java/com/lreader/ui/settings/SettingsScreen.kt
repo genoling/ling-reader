@@ -33,9 +33,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.lreader.data.DownloadSource
-import com.lreader.data.ReleaseInfo
 import com.lreader.data.SettingsStore
-import com.lreader.data.UpdateRepository
+import com.lreader.data.UpdateController
 import com.lreader.data.VocabRepository
 import com.lreader.dict.DictCatalog
 import com.lreader.dict.DictDatabase
@@ -104,7 +103,7 @@ fun SettingsScreen(onOpenAdmin: () -> Unit = {}) {
     val context = LocalContext.current
     val dict = remember { DictDatabase(context) }
     val levels = remember { LevelDictionary(context) }
-    val settings = remember { SettingsStore(context) }
+    val settings = remember { SettingsStore.get(context) }
     val vocab = remember { VocabRepository(context) }
 
     // 词典资源管理（进程级单例：安装状态与下载进度跨页面共享）
@@ -148,17 +147,10 @@ fun SettingsScreen(onOpenAdmin: () -> Unit = {}) {
     var engineItems by remember { mutableStateOf(speech.engineItems()) }
 
     // ---- 关于 / 版本更新 ----
-    val scope = rememberCoroutineScope()
-    val updater = remember { UpdateRepository(context) }
-    val versionName = remember { updater.currentVersionName() }
-    val versionCode = remember { updater.currentVersionCode() }
-    var checking by remember { mutableStateOf(false) }
-    var newRelease by remember { mutableStateOf<ReleaseInfo?>(null) }
-    var updateError by remember { mutableStateOf<String?>(null) }
-    var updateChecked by remember { mutableStateOf(false) }
-    var downloading by remember { mutableStateOf(false) }
-    var downloadProgress by remember { mutableStateOf(0f) }
-    var downloadSpeed by remember { mutableStateOf(0L) }
+    // 共用 UpdateController（进程级单例）：与启动弹窗共享检查 / 下载状态
+    val updater = remember { UpdateController.get(context) }
+    val versionName = updater.versionName
+    val versionCode = updater.versionCode
 
     // Android 13+ 的状态栏下载进度通知需要运行时权限：未授权时先申请再下载
     var pendingDownload by remember { mutableStateOf<(() -> Unit)?>(null) }
@@ -182,45 +174,8 @@ fun SettingsScreen(onOpenAdmin: () -> Unit = {}) {
         }
     }
 
-    fun checkUpdate() {
-        scope.launch {
-            checking = true
-            updateError = null
-            updater.check()
-                .onSuccess { info ->
-                    newRelease = info.takeIf { UpdateRepository.isNewer(it.version, versionName) }
-                    updateChecked = true
-                }
-                .onFailure {
-                    updateError = it.message ?: "检查更新失败"
-                    updateChecked = true
-                }
-            checking = false
-        }
-    }
-
     fun downloadAndInstall() {
-        val info = newRelease ?: return
-        withNotifyPermission {
-            scope.launch {
-                downloading = true
-                downloadProgress = 0f
-                downloadSpeed = 0L
-                updateError = null
-                val file = updater.download(info) { p, speed ->
-                    downloadProgress = p
-                    downloadSpeed = speed
-                }
-                downloading = false
-                if (file == null) {
-                    updateError = if (updater.wasCancelled()) "已取消下载" else "下载失败，请换网络后重试"
-                } else {
-                    TtsInstaller.install(context, file).onFailure {
-                        updateError = "无法打开安装界面：${it.message ?: ""}"
-                    }
-                }
-            }
-        }
+        withNotifyPermission { updater.downloadAndInstall() }
     }
 
     // 词典安装状态变化（下载完成 / 被删除）后重新统计词条数
@@ -810,7 +765,6 @@ fun SettingsScreen(onOpenAdmin: () -> Unit = {}) {
 
             }
 
-            // ---------- 关于 / 版本更新 ----------
             // ---------- 高级（管理员，需密码） ----------
             SectionTitle("高级")
             AdminEntryCard(onOpenAdmin = onOpenAdmin)
@@ -827,28 +781,44 @@ fun SettingsScreen(onOpenAdmin: () -> Unit = {}) {
                     )
                     Spacer(Modifier.height(8.dp))
 
+                    // 自动检查开关：启动弹窗里的「以后不提醒」关的就是它，这里可以再打开
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text("自动检查更新", fontSize = 13.sp, modifier = Modifier.weight(1f))
+                        Switch(
+                            checked = updater.autoCheckEnabled,
+                            onCheckedChange = { updater.setAutoCheck(it) }
+                        )
+                    }
+                    Text(
+                        "上次检查：" + UpdateController.checkTimeText(updater.lastCheckAt),
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(8.dp))
+
+                    val release = updater.newRelease
                     when {
-                        checking -> Row(verticalAlignment = Alignment.CenterVertically) {
+                        updater.checking -> Row(verticalAlignment = Alignment.CenterVertically) {
                             CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
                             Spacer(Modifier.width(8.dp))
                             Text("正在检查更新…", fontSize = 12.sp)
                         }
 
-                        downloading -> Column {
+                        updater.downloading -> Column {
                             Text(
-                                "正在下载…" + DownloadSource.speedText(downloadSpeed)
+                                "正在下载…" + DownloadSource.speedText(updater.speed)
                                     .let { if (it.isEmpty()) "" else " $it" },
                                 fontSize = 12.sp
                             )
                             Spacer(Modifier.height(6.dp))
                             LinearProgressIndicator(
-                                progress = downloadProgress,
+                                progress = updater.progress,
                                 modifier = Modifier.fillMaxWidth()
                             )
                             Spacer(Modifier.height(4.dp))
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(
-                                    "${(downloadProgress * 100).toInt()}%",
+                                    "${(updater.progress * 100).toInt()}%",
                                     fontSize = 11.sp,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -860,16 +830,16 @@ fun SettingsScreen(onOpenAdmin: () -> Unit = {}) {
                             }
                         }
 
-                        newRelease != null -> Column {
+                        release != null -> Column {
                             Text(
-                                "发现新版本 ${newRelease!!.version}",
+                                "发现新版本 ${release.version}",
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Medium,
                                 color = MaterialTheme.colorScheme.primary
                             )
                             // notes 已在 UpdateRepository 里压成纯文本（无 markdown 符号、最多 3 行），
                             // 这里只需保证不被折行挤爆：最多 4 行 + 省略号
-                            val notes = newRelease!!.notes
+                            val notes = release.notes
                             if (notes.isNotBlank()) {
                                 Spacer(Modifier.height(4.dp))
                                 Text(
@@ -887,31 +857,31 @@ fun SettingsScreen(onOpenAdmin: () -> Unit = {}) {
                                     Text("下载并安装", fontSize = 13.sp)
                                 }
                                 Spacer(Modifier.width(8.dp))
-                                TextButton(onClick = { checkUpdate() }) {
+                                TextButton(onClick = { updater.check() }) {
                                     Text("重新检查", fontSize = 12.sp)
                                 }
                             }
                         }
 
-                        updateChecked -> Row(verticalAlignment = Alignment.CenterVertically) {
+                        updater.checked -> Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
                                 "已是最新版本",
                                 fontSize = 12.sp,
                                 color = MaterialTheme.colorScheme.primary
                             )
                             Spacer(Modifier.weight(1f))
-                            TextButton(onClick = { checkUpdate() }) {
+                            TextButton(onClick = { updater.check() }) {
                                 Text("重新检查", fontSize = 12.sp)
                             }
                         }
 
                         else -> TextButton(
-                            onClick = { checkUpdate() },
+                            onClick = { updater.check() },
                             contentPadding = PaddingValues(0.dp)
                         ) { Text("检查更新", fontSize = 13.sp) }
                     }
 
-                    updateError?.let {
+                    updater.error?.let {
                         Spacer(Modifier.height(4.dp))
                         Text(
                             it,

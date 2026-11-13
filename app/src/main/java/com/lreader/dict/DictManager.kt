@@ -62,7 +62,7 @@ class DictManager private constructor(private val context: Context) {
             }
     }
 
-    private val settings = SettingsStore(context)
+    private val settings = SettingsStore.get(context)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val jobs = HashMap<String, Job>()
     private val states = LinkedHashMap<String, Status>()

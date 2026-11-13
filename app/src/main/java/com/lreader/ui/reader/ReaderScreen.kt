@@ -83,7 +83,7 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
     val dict = remember { DictDatabase(context) }
     val levels = remember { LevelDictionary(context) }
     val vocab = remember { VocabRepository(context) }
-    val settings = remember { SettingsStore(context) }
+    val settings = remember { SettingsStore.get(context) }
     // 进程级单例：不要每个页面各自 init/shutdown，否则切页面就把引擎拆了重建
     val speech = SpeechManager.get(context)
 

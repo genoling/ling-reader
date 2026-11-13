@@ -7,8 +7,20 @@ import java.io.File
 
 /**
  * 应用设置（JSON 持久化）。
+ *
+ * **进程级单例**（见 [get]）：写盘是「整份 JSON 覆盖」，若各页面各持一份内存副本，
+ * 后写的会把别人刚改的字段（比如更新检查时间戳）覆盖回旧值。
  */
-class SettingsStore(context: Context) {
+class SettingsStore private constructor(context: Context) {
+
+    companion object {
+        @Volatile
+        private var instance: SettingsStore? = null
+
+        fun get(context: Context): SettingsStore = instance ?: synchronized(this) {
+            instance ?: SettingsStore(context.applicationContext).also { instance = it }
+        }
+    }
 
     private val file = File(context.filesDir, "settings.json")
     private val obj = JSONObject()
@@ -179,4 +191,33 @@ class SettingsStore(context: Context) {
     var youdaoBookName: String
         get() = obj.optString("youdaoBookName", "")
         set(v) { obj.put("youdaoBookName", v.trim()); persist() }
+
+    // ---- 应用更新（逻辑见 data/UpdateController.kt）----
+    /** 启动时自动检查新版本；「以后不提醒」会关掉它，可在设置页重新打开 */
+    var autoCheckEnabled: Boolean
+        get() = obj.optBoolean("autoCheckEnabled", true)
+        set(v) { obj.put("autoCheckEnabled", v); persist() }
+
+    /** 上次**成功**检查更新的时间（毫秒，0 = 从未检查）——24 小时节流就看它 */
+    var lastCheckAt: Long
+        get() = obj.optLong("lastCheckAt", 0L)
+        set(v) { obj.put("lastCheckAt", v); persist() }
+
+    /** 用户点过「本次不更新」的版本号：只忽略这一个版本，更高的版本仍会提示 */
+    var ignoredVersion: String
+        get() = obj.optString("ignoredVersion", "")
+        set(v) { obj.put("ignoredVersion", v.trim()); persist() }
+
+    /** 首次启动时间（毫秒）：新用户首日不弹更新，先让他熟悉产品 */
+    var firstInstallAt: Long
+        get() = obj.optLong("firstInstallAt", 0L)
+        set(v) { obj.put("firstInstallAt", v); persist() }
+
+    /** 取首次启动时间；还没有记录时以当前时刻为准并落盘 */
+    fun ensureFirstInstallAt(now: Long = System.currentTimeMillis()): Long {
+        val v = firstInstallAt
+        if (v > 0L) return v
+        firstInstallAt = now
+        return now
+    }
 }

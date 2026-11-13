@@ -60,7 +60,7 @@ fun ReviewScreen(
 ) {
     val context = LocalContext.current
     val repo = remember { VocabRepository(context) }
-    val settings = remember { SettingsStore(context) }
+    val settings = remember { SettingsStore.get(context) }
     // 进程级单例，见 SpeechManager.get
     val speech = SpeechManager.get(context)
     val dict = remember { DictDatabase(context) }
@@ -554,7 +554,7 @@ private fun PosGroup(group: PosDefs) {
 @Composable
 private fun SentenceTranslation(sentence: String) {
     val context = LocalContext.current
-    val targetLang = remember { SettingsStore(context).targetLang }
+    val targetLang = remember { SettingsStore.get(context).targetLang }
     var loading by remember(sentence) { mutableStateOf(false) }
     var result by remember(sentence) { mutableStateOf<TranslationResult?>(null) }
     var retry by remember(sentence) { mutableStateOf(0) }

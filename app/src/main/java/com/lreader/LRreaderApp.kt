@@ -25,7 +25,9 @@ class LRreaderApp : Application() {
         TranslationEngines.init(this)
         // 语音引擎 APK 与词典共用同一套下载管理（进度 / 取消 / 校验 / 删除），先把清单登记进去
         DictManager.get(this).register(TtsCatalog.ENGINES)
-        val settings = SettingsStore(this)
+        val settings = SettingsStore.get(this)
+        // 首次启动记一笔时间：更新检查用它判断「新装首日」——第一天不弹更新，先让用户用起来
+        settings.ensureFirstInstallAt()
         // 启动时套用用户上次选择的界面配色
         AppThemeState.apply(settings.themePreset)
         // 启动即初始化发音引擎。阅读页首次加载要先解压 115MB 词典（dict.ensureReady），

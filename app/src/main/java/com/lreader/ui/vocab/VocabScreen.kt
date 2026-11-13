@@ -64,7 +64,7 @@ fun VocabScreen(
 ) {
     val context = LocalContext.current
     val repo = remember { VocabRepository(context) }
-    val settings = remember { SettingsStore(context) }
+    val settings = remember { SettingsStore.get(context) }
     // 进程级单例，见 SpeechManager.get
     val speech = SpeechManager.get(context)
     val dict = remember { DictDatabase(context) }

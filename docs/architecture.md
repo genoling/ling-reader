@@ -91,8 +91,9 @@ ling-reader/                       # ★ Android 工程根目录（GitHub 仓库
             ├── data/
             │   ├── BookRepository.kt      # 书架（JSON 持久化）
             │   ├── VocabRepository.kt     # 生词本（SQLite + SM-2）
-            │   ├── SettingsStore.kt       # 设置（JSON 持久化）
+            │   ├── SettingsStore.kt       # 设置（JSON 持久化，进程级单例：整份覆盖写不能各持一份）
             │   ├── UpdateRepository.kt    # 检查更新 + 下载安装包（校验后才落盘，可取消）
+            │   ├── UpdateController.kt    # ★ 更新检查的唯一入口：节流 / 首日静默 / 忽略版本（弹窗与设置页共用）
             │   ├── DownloadNotifier.kt    # ★ 状态栏下载进度通知（含「取消」按钮）
             │   ├── DownloadCenter.kt      # 正在下载的任务登记：通知的取消按钮按 id 找回「怎么取消我」
             │   ├── DownloadCancelReceiver.kt  # 通知取消按钮的广播落点（静态注册，后台也能收到）
@@ -165,6 +166,15 @@ ling-reader/                       # ★ Android 工程根目录（GitHub 仓库
 - **更新包走 `cacheDir`**：交给系统安装器时靠 FileProvider，`res/xml/file_paths.xml` 必须同时放行
   `files-path`（语音引擎用）与 `cache-path`（更新包用），否则 `getUriForFile` 报
   `Failed to find configured root`（v1.6.1 修复的正是这一条）。
+
+**应用更新的提示策略**（`data/UpdateController.kt`）：
+- **进程级单例**：设置页与启动弹窗共用同一份检查 / 下载状态（弹窗里点了下载，设置页看到的是同一个进度）。
+- **启动检查的三重闸门**（`checkOnLaunch()`）：`autoCheckEnabled`（「以后不提醒」关掉的就是它）→
+  首日静默（`firstInstallAt` + 24h，新装第一天不推）→ 24h 节流（只记**成功**检查的 `lastCheckAt`，
+  失败不记，下次启动再试）。
+- **弹窗三动作**：「立即更新」下载并拉起系统安装器；「本次不更新」只把该版本号写进 `ignoredVersion`；
+  「以后不提醒」关掉 `autoCheckEnabled`（设置页「关于」里的开关可重新打开）。
+- **阅读页挂起**：检查完成时若正在阅读页，弹窗先不弹，回到 Tab 页再弹（见 `ui/AppNavHost.kt`）。
 
 **`dict/DictDatabase.kt`** — 主词典（下载后位于 `filesDir/dict_en_zh.db`）
 - `ensureReady()`：**不再拷贝 assets、不联网**，只打开本地文件；文件缺失或被外部删除时返回 false 并释放旧句柄

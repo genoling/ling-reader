@@ -29,7 +29,7 @@ object SyncManager {
 
     /** 当前同步配置；未配置返回 null */
     fun config(context: Context): SyncConfig? =
-        SyncCode.decode(SettingsStore(context).syncCode)
+        SyncCode.decode(SettingsStore.get(context).syncCode)
 
     fun isConfigured(context: Context): Boolean = config(context) != null
 
@@ -40,7 +40,7 @@ object SyncManager {
      * @throws SyncException 未配置 / 网络 / 权限 / 口令错误
      */
     fun sync(context: Context, push: Boolean = true): SyncEngine.Result {
-        val settings = SettingsStore(context)
+        val settings = SettingsStore.get(context)
         val cfg = SyncCode.decode(settings.syncCode)
             ?: throw SyncException("还没有配置同步码")
         val backend = GithubBackend(cfg.owner, cfg.repo, cfg.branch, cfg.token)
@@ -128,7 +128,7 @@ object SyncManager {
      */
     suspend fun autoSync(context: Context) {
         if (!isConfigured(context)) return
-        if (!SettingsStore(context).syncAuto) return
+        if (!SettingsStore.get(context).syncAuto) return
         syncing = true
         lastError = null
         try {
