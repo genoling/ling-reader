@@ -3,7 +3,9 @@ package com.lreader.data
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -131,6 +133,8 @@ class MagazineRepository(private val context: Context) {
                                 var read = 0L
                                 var last = 0L
                                 while (true) {
+                                    // 用户点了「取消」要立刻停下，别把这一整期下完（阻塞 IO 不看协程状态）
+                                    ensureActive()
                                     val n = input.read(buf)
                                     if (n <= 0) break
                                     out.write(buf, 0, n)
@@ -150,6 +154,9 @@ class MagazineRepository(private val context: Context) {
                         }
                         tmp.length() >= 1024
                     }
+                } catch (e: CancellationException) {
+                    tmp.delete()
+                    throw e
                 } catch (e: Exception) {
                     e.printStackTrace()
                     tmp.delete()

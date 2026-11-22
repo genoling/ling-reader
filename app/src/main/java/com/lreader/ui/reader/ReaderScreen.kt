@@ -512,6 +512,12 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
             onlineLoading = onlineLoading,
             onlineSource = onlineSource,
             onlineSearched = onlineSearched,
+            // 已勾「雅思词汇真经」时，级别标签换成「书名 · 第N章 章节名」
+            bookTag = if (LevelDictionary.BOOK_ZJ in enabledLevels) {
+                // 点到的可能是变形词，优先按词典还原后的原形查章节
+                (levels.bookInfoOf(w) ?: levels.bookInfoOf(dictEntry?.word ?: w))
+                    ?.let { "雅思词汇真经 · 第${it.chapter}章 ${it.name}" }
+            } else null,
             sourceBook = book?.title ?: "",
             inVocab = vocabWords.contains(w.lowercase()) ||
                 vocabWords.contains((dictEntry?.word ?: w).lowercase()),
@@ -693,7 +699,8 @@ private fun LevelHighlightDialog(
                 }
                 Text(
                     "勾选雅思/托福等较高级别时，不再高亮同时属于高中/四级/六级的词" +
-                        "（这些词表里混有大量基础词）；只勾高中/四级/六级时不生效。",
+                        "（这些词表里混有大量基础词）；只勾高中/四级/六级时、以及整本书词表" +
+                        "（雅思词汇真经）都不受此开关影响。",
                     fontSize = 11.sp,
                     lineHeight = 17.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant

@@ -20,11 +20,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lreader.data.BookRepository
 import com.lreader.data.Magazine
+import com.lreader.data.MagazineDownloader
 import com.lreader.data.MagazineRepository
 import com.lreader.dict.DictCatalog
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 /**
  * 外刊杂志：直接浏览 GitHub 仓库 `hehonghui/awesome-english-ebooks` 的期号，
@@ -38,6 +37,8 @@ fun MagazineScreen() {
     val context = LocalContext.current
     val mags = remember { MagazineRepository(context) }
     val books = remember { BookRepository(context) }
+    // 下载跑在进程级单例里：切 Tab / 页面销毁都不会中断（见 MagazineDownloader 注释）
+    val downloader = remember { MagazineDownloader.get(context) }
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
 
@@ -45,8 +46,6 @@ fun MagazineScreen() {
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var group by remember { mutableStateOf<String?>(null) }
-    var downloading by remember { mutableStateOf<String?>(null) }
-    var progress by remember { mutableStateOf(0f) }
     var shelfTitles by remember { mutableStateOf<Set<String>>(emptySet()) }
 
     fun refreshShelf() {
@@ -69,31 +68,17 @@ fun MagazineScreen() {
         load()
     }
 
-    fun download(mag: Magazine) {
-        if (downloading != null) return
-        downloading = mag.title
-        progress = 0f
-        scope.launch {
-            val file = mags.download(mag) { progress = it }
-            if (file == null) {
-                snackbar.showSnackbar("下载失败：${mag.title}（换个网络或稍后重试）")
-            } else {
-                val imported = withContext(Dispatchers.IO) {
-                    val book = books.importFile(file) ?: return@withContext null
-                    val l = books.load().toMutableList()
-                    if (l.none { it.id == book.id }) l.add(book)
-                    books.save(l)
-                    books.ensureCover(book)
-                }
-                file.delete()
-                refreshShelf()
-                snackbar.showSnackbar(
-                    if (imported != null) "已加入书架：${mag.title}" else "导入失败"
-                )
-            }
-            downloading = null
-            progress = 0f
+    // 下载完成 / 失败 / 取消的提示：即使这期间用户切走了，回来也能看到
+    LaunchedEffect(downloader.message) {
+        downloader.message?.let {
+            snackbar.showSnackbar(it)
+            downloader.message = null
         }
+    }
+
+    // 下载完成后「已在书架」标记要跟着更新
+    LaunchedEffect(downloader.shelfRevision) {
+        if (downloader.shelfRevision > 0) refreshShelf()
     }
 
     val groups = remember(list) { list.map { it.group }.distinct() }
@@ -183,9 +168,10 @@ fun MagazineScreen() {
                                 inShelf = shelfTitles.any {
                                     it == mag.title || it.startsWith(mag.title + "_")
                                 },
-                                downloading = downloading == mag.title,
-                                progress = progress,
-                                onDownload = { download(mag) }
+                                downloading = downloader.downloading == mag.title,
+                                progress = downloader.progress,
+                                onDownload = { downloader.start(mag) },
+                                onCancel = { downloader.cancel() }
                             )
                         }
                     }
@@ -201,7 +187,8 @@ private fun MagRow(
     inShelf: Boolean,
     downloading: Boolean,
     progress: Float,
-    onDownload: () -> Unit
+    onDownload: () -> Unit,
+    onCancel: () -> Unit
 ) {
     Card {
         Row(
@@ -235,11 +222,20 @@ private fun MagRow(
 
             Spacer(Modifier.width(8.dp))
             when {
-                downloading -> Text(
-                    "${(progress * 100).toInt()}%",
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.primary
-                )
+                downloading -> Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "${(progress * 100).toInt()}%",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    // 下载在后台继续跑，这里给唯一的停止入口
+                    TextButton(
+                        onClick = onCancel,
+                        contentPadding = PaddingValues(horizontal = 6.dp)
+                    ) {
+                        Text("取消", fontSize = 12.sp)
+                    }
+                }
 
                 inShelf -> Text(
                     "已在书架",

@@ -194,7 +194,9 @@ fun SettingsScreen(onOpenAdmin: () -> Unit = {}) {
 
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) {
-            if (levels.ensureReady()) levelTotal = levels.levelCounts.values.sum()
+            // 只统计随包内置的 levels.db 词条数；整本书词表（雅思词汇真经）不算进这份资源
+            if (levels.ensureReady()) levelTotal = levels.levelCounts
+                .filterKeys { it !in LevelDictionary.BOOK_LEVELS }.values.sum()
             vocabCount = vocab.count()
         }
         speech.accent = if (accent == "UK") SpeechManager.Accent.UK else SpeechManager.Accent.US
@@ -628,7 +630,7 @@ fun SettingsScreen(onOpenAdmin: () -> Unit = {}) {
                         "雅思 / 托福 / GRE 的词表是按「考试要求掌握的词汇」收录的，混有大量高中、四级、六级词" +
                             "（实测雅思 3427 词里 82.7% 与更基础的级别重叠）。" +
                             "开启后勾选这些高阶级别时不再高亮基础词，只留下真正有难度的；" +
-                            "只勾高中 / 四级 / 六级时该开关不生效。",
+                            "只勾高中 / 四级 / 六级时该开关不生效，整本书词表（雅思词汇真经）也不受影响。",
                         fontSize = 11.sp,
                         lineHeight = 17.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant

@@ -209,6 +209,37 @@ gh release upload dict-v2 .codebuddy/build/ecdict.db --clobber
 
 ---
 
+## 仓库里没有的东西（换机器 clone 后怎么继续开发）
+
+`.gitignore` 挡掉了本机环境、密钥与几十 MB 的素材。**代码与文档是完整的**，clone 下来只缺下面这些；
+按表补齐即可继续开发，缺任何一项都不会导致「代码跑不起来」，只会缺对应能力。
+
+| 本机文件 | 为什么要挡 | 丢了怎么办 |
+|---|---|---|
+| `local.properties` | 有本机 SDK 绝对路径 + 同步仓库令牌 | 新建两行：`sdk.dir=E:\\Android_Sdk`、`sync.token=<GitHub PAT>`（没有令牌也能构建，设置页会退化成手填 token） |
+| `keystore.properties` + `lingreader-release.jks` | 发布签名密钥 | **必须自己备份**。丢了只能用新签名发布，老用户要卸载重装（数据靠云同步恢复） |
+| `.codebuddy/` | AI 工作区：`memory/`（协作约定、坑点、每日流水）、`b.ps1`、`env.bat`、自测脚本 | 不影响构建；建议新建一份 `memory/` 重新记录 |
+| `data/` | 原始素材 + 样例书（40MB+） | 只影响重新生成词表/测 EPUB，见下 |
+| `dict-assets/` | 115MB 主词典源，超 GitHub 单文件限制 | 已在 Release `dict-v1` / `dict-v2` 上，直接下回来 |
+| `keystore/`、`*.apk`、`build/` | 产物与密钥 | 重新 `assembleRelease` |
+
+### 唯一需要「重新生成」的随包资源：`app/src/main/assets/ielts_zj.txt`
+
+3,697 个词条（`word<TAB>章节序号<TAB>章节名`）来自两份公开整理，仓库里只放结果文件（86KB）：
+
+```bash
+mkdir -p data
+curl -L -o data/my_ielts_vocab.txt \
+  "https://cdn.jsdelivr.net/gh/hefengxian/my-ielts@master/src/pages/vocabulary/vocabulary.txt"
+curl -L -o data/ielts_zj_source.csv \
+  "https://cdn.jsdelivr.net/gh/LynnShaw/vocabulary_for_ielts@main/word_list.csv"
+python -X utf8 .codebuddy/gen_ielts_zj.py write   # 合并去重 → 写 assets（CSV 是 txt 的子集，补美式拼写）
+```
+
+（`gen_ielts_zj.py` 在 `.codebuddy/`，如已丢失，按上面格式直接用 `vocabulary.txt` 的章节切分重写即可。）
+
+---
+
 ## 合规边界
 
 本项目是**独立开发的原创应用**，UI 与代码均为自研。
@@ -235,7 +266,6 @@ gh release upload dict-v2 .codebuddy/build/ecdict.db --clobber
 | 优先级 | 功能 | 涉及模块 |
 |---|---|---|
 | 高 | 生词本导入（CSV 反向导入，打通 Anki 往返） | `export/VocabImporter.kt` + `VocabScreen` 菜单 |
-| 高 | 外刊杂志内容（当前仅占位页） | `ui/magazine/MagazineScreen.kt` + RSS/OPDS 拉取 |
 | 中 | 阅读书签 / 笔记 | 新增 `NoteRepository` + 阅读页菜单 |
 | 中 | 词典管理（导入自定义 mdx / 本地 db 文件） | 新增 MDX 解析器（Kotlin 版）+ 复用 `DictManager` 的导入入口 |
 | 中 | 生词本排序 / 分组 / 批量删除 | `ui/vocab/VocabScreen.kt` |

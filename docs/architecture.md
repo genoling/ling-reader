@@ -14,7 +14,7 @@ LingReader 的目录组织、模块职责与关键数据流。
 | AGP / Gradle / Kotlin | 8.1.4 / 8.9 / 1.8.10 |
 | Compose | Compose 1.4.3 + Compiler 1.4.3 + material3 1.1.2 |
 | 构建产物 | debug `app-debug.apk` ≈ 20.4 MB ／ release `app-release.apk` ≈ 14.5 MB（正式签名） |
-| 当前版本 | **v1.6.3**（`versionCode` = 21、`versionName` = `1.6.3`） |
+| 当前版本 | **v1.7.0**（`versionCode` = 28、`versionName` = `1.7.0`） |
 
 ### 设计原则
 
@@ -48,7 +48,8 @@ ling-reader/                       # ★ Android 工程根目录（GitHub 仓库
     └── src/main/
         ├── AndroidManifest.xml
         ├── assets/
-        │   └── levels.db          # 4.6MB(4,800,512B) 分级词库（3.9万词条，随包内置）
+        │   ├── levels.db          # 4.6MB(4,800,512B) 分级词库（3.9万词条，随包内置）
+        │   └── ielts_zj.txt       # 28KB 雅思词汇真经词表（3,697 词条，每行一个，`#` 为注释）
         │                          # ※ 主词典 dict_en_zh.min.db 已移出 assets，改从 GitHub Release 下载
         ├── res/                   # 图标、主题、字符串；xml/network_security_config.xml 放行 http 下载源
         └── java/com/lreader/
@@ -94,6 +95,7 @@ ling-reader/                       # ★ Android 工程根目录（GitHub 仓库
             │   ├── SettingsStore.kt       # 设置（JSON 持久化，进程级单例：整份覆盖写不能各持一份）
             │   ├── UpdateRepository.kt    # 检查更新 + 下载安装包（校验后才落盘，可取消）
             │   ├── UpdateController.kt    # ★ 更新检查的唯一入口：节流 / 首日静默 / 忽略版本（弹窗与设置页共用）
+            │   ├── MagazineDownloader.kt  # ★ 外刊下载（进程级单例：切页面不中断，手动取消才停）
             │   ├── DownloadNotifier.kt    # ★ 状态栏下载进度通知（含「取消」按钮）
             │   ├── DownloadCenter.kt      # 正在下载的任务登记：通知的取消按钮按 id 找回「怎么取消我」
             │   ├── DownloadCancelReceiver.kt  # 通知取消按钮的广播落点（静态注册，后台也能收到）
@@ -106,7 +108,7 @@ ling-reader/                       # ★ Android 工程根目录（GitHub 仓库
                 ├── AppNavHost.kt          # 导航图 + 底部导航 + 路由定义
                 ├── theme/AppTheme.kt      # 全局视觉规范（集中调色）
                 ├── study/StudyScreen.kt   # 背单词 Tab（生词本/复习 二级切换）
-                ├── magazine/MagazineScreen.kt # 外刊杂志（占位页）
+                ├── magazine/MagazineScreen.kt # 外刊杂志：目录 + 下载（下载在 MagazineDownloader 单例里）
                 ├── shelf/ShelfScreen.kt   # 书架页
                 ├── reader/
                 │   ├── ReaderScreen.kt    # 阅读页（核心，分页/滑动/下拉调参/长按选词）
@@ -167,6 +169,15 @@ ling-reader/                       # ★ Android 工程根目录（GitHub 仓库
   `files-path`（语音引擎用）与 `cache-path`（更新包用），否则 `getUriForFile` 报
   `Failed to find configured root`（v1.6.1 修复的正是这一条）。
 
+**外刊下载为什么必须放单例里**（`data/MagazineDownloader.kt`，v1.7.0）：
+- 早期 `MagazineScreen` 用 `rememberCoroutineScope()` 起下载 → 页面离开组合（切 Tab / 进阅读页）协程就被取消，
+  用户看到「切换 UI 下载就停」。所有**耗时下载都不许绑在界面 scope 上**，这与 `DictManager` / `UpdateController`
+  用进程级 `CoroutineScope(SupervisorJob() + Dispatchers.IO)` 是同一条约定。
+- 单例持有 `downloading` / `progress` / `message`（Compose 状态）+ `shelfRevision`，页面随时来读；
+  完成提示与「已在书架」刷新都靠这几个状态补上，不依赖页面还活着。
+- `MagazineRepository.download()` 的拷贝循环里每块都 `ensureActive()`：取消能立刻中断（阻塞 IO 不看协程状态），
+  并在 `CancellationException` 分支删掉 `.part`（注意别被外层 `catch (e: Exception)` 吞掉当成「镜像失败」）。
+
 **应用更新的提示策略**（`data/UpdateController.kt`）：
 - **进程级单例**：设置页与启动弹窗共用同一份检查 / 下载状态（弹窗里点了下载，设置页看到的是同一个进度）。
 - **启动检查的三重闸门**（`checkOnLaunch()`）：`autoCheckEnabled`（「以后不提醒」关掉的就是它）→
@@ -197,6 +208,15 @@ ling-reader/                       # ★ Android 工程根目录（GitHub 仓库
 - 表结构：`level_word(word, level, phonetic, meaning)`、`level_meta(level, name, word_count)`。
 - `ensureReady()` 时**全量载入内存**构建 `HashMap<word, List<level>>`，查询 O(1)。
 - `levelsOf(word)` / `matches(word, enabledLevels)` / `primaryLevel(word)` / `colorOf(level)`。
+- **整本书词表（v1.7.0）**：`loadBookList()` 把随包的 `assets/ielts_zj.txt`（雅思词汇真经 3,697 词条）
+  合并进**同一份索引**，级别 key `IELTS_ZJ`（显示名「雅思词汇真经」，颜色 `#7E57C2`）。
+  于是设置页 / 阅读页弹窗按 `levelNames` 自动多出一行，无需额外的 UI 分支。
+  - `LEVEL_ORDER` 里排在 10 个考试级别**之后** → 同时属于四级与真经的词仍按四级着色。
+  - `BOOK_LEVELS`（= `IELTS_ZJ`）**不参与**「忽略基础词」过滤：真经绝大多数词与基础档重叠，
+    参与过滤会把整本书滤空；`matchLevel()` 的过滤条件里显式排除了它。
+  - 设置页「分级词库」资源卡片仍只统计 `levels.db` 的词条数（`levelCounts - BOOK_LEVELS`）。
+  - 词表每行为 `word<TAB>章节序号<TAB>章节名`，`bookInfoOf(word)` 返回 `BookInfo(chapter, name)`；
+    `DictBottomSheet(bookTag = "雅思词汇真经 · 第N章 章节名")` 用它**替换**考试级别标签（同一词多章时取书里靠前的一章）。
 
 ### 语音 `speech/SpeechManager.kt`
 

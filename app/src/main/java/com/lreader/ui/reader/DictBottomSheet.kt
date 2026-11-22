@@ -21,11 +21,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.lreader.dict.LevelDictionary
 import com.lreader.model.DictEntry
 import com.lreader.model.TranslationResult
 import kotlinx.coroutines.delay
@@ -49,6 +51,11 @@ fun DictBottomSheet(
     onlineSource: Boolean = false,
     /** 在线兜底已经返回（null = 也没查到） */
     onlineSearched: Boolean = false,
+    /**
+     * 该词属于《雅思词汇真经》时替换级别标签，如「雅思词汇真经 · 第16章 社会经济」。
+     * 为空则照旧显示考试级别（六级 / 考研…）。
+     */
+    bookTag: String? = null,
     sourceBook: String,
     inVocab: Boolean,
     onSpeak: () -> Unit,
@@ -94,16 +101,22 @@ fun DictBottomSheet(
                             Text(it, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             Spacer(Modifier.width(8.dp))
                         }
-                        entry?.levelName?.let {
+                        // 属于雅思词汇真经时优先显示「书名 · 第N章 章节名」，盖过考试级别标签
+                        val tagText = bookTag ?: entry?.levelName
+                        if (tagText != null) {
+                            val tagColor =
+                                if (bookTag != null) Color(LevelDictionary.BOOK_ZJ_COLOR)
+                                else MaterialTheme.colorScheme.primary
                             Surface(
                                 shape = MaterialTheme.shapes.small,
-                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+                                color = tagColor.copy(alpha = 0.12f)
                             ) {
                                 Text(
-                                    it,
+                                    tagText,
                                     fontSize = 11.sp,
+                                    maxLines = 1,
                                     modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                    color = MaterialTheme.colorScheme.primary
+                                    color = tagColor
                                 )
                             }
                         }

@@ -9,6 +9,9 @@ import com.lreader.model.LevelConfig
  *
  * 资源**随包内置**（见 [DictCatalog.LEVELS]）：assets/levels.db 由 [DictManager] 释放到 filesDir，
  * 之后以只读方式打开。词数较小（39K），可全量载入内存构建哈希索引，查询 O(1)。
+ *
+ * 另有一份**整本书词表**——《雅思词汇真经》（刘洪波）3600+ 词，来自 assets/ielts_zj.txt，
+ * 由 [loadBookList] 合并进同一份索引，对外就是一个普通级别（[BOOK_ZJ]）。
  */
 class LevelDictionary(private val context: Context) {
 
@@ -22,7 +25,10 @@ class LevelDictionary(private val context: Context) {
         "IELTS" to 0xFF00838F.toInt(),
         "TOEFL" to 0xFFAF601A.toInt(),
         "GAOZHONG" to 0xFF558B2F.toInt(),
-        "BEC" to 0xFF4E342E.toInt()
+        "BEC" to 0xFF4E342E.toInt(),
+        // 真经用较亮的紫罗兰：现有 10 档都是深色（#2E7D32…），石板灰那类深色在米黄纸上
+        // 与正文几乎同色，实机看不出高亮
+        "IELTS_ZJ" to BOOK_ZJ_COLOR
     )
 
     /**
@@ -35,7 +41,9 @@ class LevelDictionary(private val context: Context) {
      * 不能直接当难度序用。
      */
     private val LEVEL_ORDER = listOf(
-        "GAOZHONG", "CET4", "CET6", "BEC", "KaoYan", "TEM4", "TEM8", "IELTS", "TOEFL", "GRE"
+        "GAOZHONG", "CET4", "CET6", "BEC", "KaoYan", "TEM4", "TEM8", "IELTS", "TOEFL", "GRE",
+        // 整本书词表排在最后：同一个词若也属于某个考试词表，仍按考试级别着色
+        BOOK_ZJ
     )
 
     /** 未知级别排到最后 */
@@ -46,15 +54,38 @@ class LevelDictionary(private val context: Context) {
         /** 内置资源描述：体积小（4.6MB）随包分发；将来要改成「按需下载」只需把 assetName 置空 */
         private val RES = DictCatalog.LEVELS
 
+        /** 《雅思词汇真经》（刘洪波）整本书词表的级别 key */
+        const val BOOK_ZJ = "IELTS_ZJ"
+
+        /** 词表资源：每行一个词条，`#` 开头为注释 */
+        private const val BOOK_ZJ_ASSET = "ielts_zj.txt"
+        private const val BOOK_ZJ_NAME = "雅思词汇真经"
+
+        /** 真经的高亮色（正文与查词弹层标签共用） */
+        const val BOOK_ZJ_COLOR = 0xFF7E57C2.toInt()
+
         /**
          * 视为「基础词」的级别（最基础的三档）。
          * levels.db 是按「考试要求掌握的词汇」收录的，高级词表里混进了大量基础词，见 [matchLevel]。
          */
         val BASIC_LEVELS = setOf("GAOZHONG", "CET4", "CET6")
+
+        /**
+         * 「整本书词表」型级别：**不参与**「忽略基础词」的过滤判断。
+         *
+         * 真经 3600+ 词绝大多数同时属于高中/四级/六级，若按考试词表那样过滤，
+         * 只勾真经时几乎整本书都会被滤空（实测雅思词表就是这么只剩 5% 的）。
+         */
+        val BOOK_LEVELS = setOf(BOOK_ZJ)
     }
+
+    /** 整本书词表里的一个词条位置（查词弹层显示「第 N 章 章节名」） */
+    data class BookInfo(val chapter: Int, val name: String)
 
     /** word(lowercase) -> 级别列表 */
     private val index = HashMap<String, MutableList<String>>()
+    /** word(lowercase) -> 在整本书词表里的章节 */
+    private val bookChapters = HashMap<String, BookInfo>()
     /** level -> 显示名 */
     val levelNames = LinkedHashMap<String, String>()
     /** level -> 词数 */
@@ -87,6 +118,7 @@ class LevelDictionary(private val context: Context) {
                 }
             }
             db.close()
+            loadBookList()
             ready = true
             true
         } catch (e: Exception) {
@@ -94,6 +126,47 @@ class LevelDictionary(private val context: Context) {
             false
         }
     }
+
+    /**
+     * 载入随包内置的整本书词表（assets/ielts_zj.txt），合并进同一份索引。
+     *
+     * 行格式：`word<TAB>章节序号<TAB>章节名`（只写一个词也能用，章节信息缺失则弹层不显示章节）。
+     * 词表缺失 / 读取失败只记日志，不影响考试词表的高亮（老设备升级后也不会崩）。
+     */
+    private fun loadBookList() {
+        try {
+            context.assets.open(BOOK_ZJ_ASSET).bufferedReader(Charsets.UTF_8).use { reader ->
+                var count = 0
+                reader.forEachLine { line ->
+                    val s = line.trim()
+                    if (s.isEmpty() || s.startsWith("#")) return@forEachLine
+                    val parts = s.split('\t')
+                    val w = parts[0].trim()
+                    if (w.isEmpty()) return@forEachLine
+                    val key = w.lowercase()
+                    val list = index.getOrPut(key) { mutableListOf() }
+                    if (BOOK_ZJ !in list) {
+                        list.add(BOOK_ZJ)
+                        count++
+                    }
+                    if (bookChapters[key] == null && parts.size >= 3) {
+                        val no = parts[1].trim().toIntOrNull() ?: 0
+                        val name = parts[2].trim()
+                        if (no > 0) bookChapters[key] = BookInfo(no, name)
+                    }
+                }
+                if (count > 0) {
+                    levelNames[BOOK_ZJ] = BOOK_ZJ_NAME
+                    levelCounts[BOOK_ZJ] = count
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    /** 该词在整本书词表（雅思词汇真经）里的章节；不在词表里返回 null */
+    fun bookInfoOf(word: String): BookInfo? = bookChapters[word.trim().lowercase()]
 
     /** 查询某个词所属的所有级别 */
     fun levelsOf(word: String): List<String> =
@@ -111,6 +184,8 @@ class LevelDictionary(private val context: Context) {
      *   雅思高亮占比 3.06% → 0.44%。
      *   **只勾高中/四级/六级时不生效**：这三档本身就是基础档，否则勾高中会连自己词表里的词
      *   一起滤掉（实测正文高亮 59.5% → 1.05%、词种只剩 5%）。
+     *   **整本书词表（[BOOK_ZJ] 雅思词汇真经）既不触发也不受此过滤影响**：该书 3600+ 词
+     *   绝大多数与基础档重叠，参与过滤等于把整本书滤掉。
      */
     fun matchLevel(
         word: String,
@@ -119,7 +194,12 @@ class LevelDictionary(private val context: Context) {
     ): String? {
         if (enabledLevels.isEmpty()) return null
         val list = index[word.trim().lowercase()] ?: return null
-        if (skipBasic && enabledLevels.any { it !in BASIC_LEVELS } &&
+        // 该词属于某个**已勾选**的整本书词表时，一律不过滤：
+        // 「忽略基础词」是为了让雅思/托福词表别被四六级词淹没，而真经是「这本书里的词」，
+        // 勾了就该看到（真经 84.3% 的词与基础档重叠，参与过滤等于整本滤空）。
+        val inEnabledBook = list.any { it in BOOK_LEVELS && it in enabledLevels }
+        if (!inEnabledBook && skipBasic &&
+            enabledLevels.any { it !in BASIC_LEVELS && it !in BOOK_LEVELS } &&
             list.any { it in BASIC_LEVELS && it !in enabledLevels }
         ) {
             return null
